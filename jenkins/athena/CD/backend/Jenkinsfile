@@ -1,0 +1,398 @@
+// Notify to channel
+def notifyGChat(stage, service, branch, version, channel) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "Status: *${currentBuild.result}*\nType: Backend\nStage: CD - ${stage}\nService: ${service}\nBranch: ${branch}\n*Version*: ${version}\nDuration: ${DURATION}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack(stage, service, branch, version, channel) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *Athena Backend*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Status: *${currentBuild.result}*\nStage: CD - ${stage}\nService: ${service}\nBranch: ${branch}\n*Version*: ${version}\nDuration: ${DURATION}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+
+pipeline {
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    string(name: 'branch_name', description: 'Branch Name of the build which need to be deployed.')
+    choice(
+      name: 'service', 
+      choices: [
+        'gateway', 'athena', 'geocodeservice', 'aggregateservice', 'overlay', 'rres', 'importservice', 
+        'ivin', 'timeattendance', 'geocalculation', 'command-distributor', 'specialneeds'], 
+      description: 'The Service Build that trigger this job.')
+    string(name: 'binary_path', description: "The binary path file name. Ex: s3://edulog-athena-artifacts/athena/build/")
+    string(name: 'version', defaultValue: '', description: 'Version of Service.')
+  }
+
+  environment {
+    JOB_DEPLOY_K8S = 'athena/backend/deployment/be-cd-k8s'
+
+    GW_NAME = 'gateway'
+    GC_NAME = 'GeoCodeService'
+    AS_NAME = 'AggregateService'
+    OL_NAME = 'Overlay'
+    RRES_NAME = 'RideRegistrationETL'
+    IS_NAME = 'ImportService'
+    IVIN_NAME = 'IVIN'
+    EDTA_NAME = 'DriverTimeAndAttendance'
+    GCAL_NAME = 'GeoCalculation'
+    ACDS_NAME = 'CommandDistributor'
+    SN_NAME = 'SpecialNeeds'
+
+
+    ENV_TYPE = 'nonprod'
+    
+    GCHAT_TOKEN = "${GCHAT_TOKEN_ATH_BE_CICD}"
+    GCHAT_TOKEN_BUILDVERSION = "${GCHAT_TOKEN_ATH_BUILDVERSION}"
+    SLACK_CHANNEL = "${SLACK_ATH_CICD_BE}"
+    SLACK_CHANNEL_BUILDVERSION = "${SLACK_ATH_BUILDVERSION}"
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Get Service Name') {
+          steps {
+            script {
+              switch(service) {
+                case 'gateway':
+                  env.service_name = GW_NAME
+                  break
+                case 'geocodeservice':
+                  env.service_name = GC_NAME
+                  break
+                case 'aggregateservice':
+                  env.service_name = AS_NAME
+                  break
+                case 'importservice':
+                  env.service_name = IS_NAME
+                  break
+                case 'rres':
+                  env.service_name = RRES_NAME
+                  break
+                case 'overlay':
+                  env.service_name = OL_NAME
+                  break
+                case 'ivin':
+                  env.service_name = IVIN_NAME
+                  break
+                case 'timeattendance':
+                  env.service_name = EDTA_NAME
+                  break
+                case 'geocalculation':
+                  env.service_name = GCAL_NAME
+                  break
+                case 'command-distributor':
+                  env.service_name = ACDS_NAME
+                  break
+                case 'specialneeds':
+                  env.service_name = SN_NAME
+                  break
+                default:
+                  env.service_name = 'Athena'
+                  break
+              }
+            }
+          }
+        }
+        stage('Get environment information') {
+          steps {
+            echo "=> branch_name: ${params.branch_name}"
+            script {
+              env.ENV_NAME = ''
+              env.ENV_NAME_2 = ''
+              env.SHOULD_RUN_CD = 'yes'
+              switch(branch_name) {
+                case 'development-ktvn':
+                  env.ENV_NAME = 'development-ktvn'
+                  env.ENV_NAME_2 = 'devleg'
+                  break
+                case 'ktvn':
+                  env.ENV_NAME = 'ktvn'
+                  env.ENV_NAME_2 = 'stageleg'
+                  break
+                case 'development-fr':
+                  env.ENV_NAME = 'development-fr'
+                  break
+                case 'fr':
+                  env.ENV_NAME = 'fr'
+                  break
+                case 'develop':
+                  env.ENV_NAME = 'develop'
+                  break
+                case 'master':
+                  env.ENV_NAME = 'dg-uat'
+                  env.SHOULD_RUN_CD = 'no'
+                  break
+                case 'main':
+                  env.ENV_NAME = 'dg-uat'
+                  env.SHOULD_RUN_CD = 'no'
+                  break
+                default:
+                  env.SHOULD_RUN_CD = 'no'
+                  break
+              }
+
+              // check if branch_name match pattern "release/*" then set branch_name
+              def releasePattern = ~/release\/.+/
+              def matchRelease = releasePattern.matcher(branch_name).matches()
+              if(matchRelease) { 
+                env.ENV_NAME = 'release'
+                env.ENV_NAME_2 = 'release-2'
+                env.ENV_NAME_3 = 'release-3'
+                env.SHOULD_RUN_CD = 'yes'
+              }
+
+              // check if branch_name match pattern "hotfix/*" and hotfix env existing
+              def hotfixPattern = ~/hotfix\/.+/
+              def matchHotfix = hotfixPattern.matcher(branch_name).matches()
+              if(matchHotfix) {
+                env.ENV_NAME = 'hotfix'
+                BE_ASG_NAME = sh(script: '/usr/local/bin/check_asg get_ssm --envtype=${ENV_TYPE} --envname=${ENV_NAME}', returnStdout: true).trim()
+                if(BE_ASG_NAME) {
+                  env.ENV_NAME = 'hotfix'
+                  env.BE_ASG_NAME = BE_ASG_NAME
+                  env.SHOULD_RUN_CD = 'yes'
+                }
+                else {
+                  env.SHOULD_RUN_CD = 'no'
+                }
+              }
+            }
+            echo "=> env_name: ${ENV_NAME}"
+            echo "=> binary_path: ${params.binary_path}"
+            echo "=> version: ${params.version}"
+            echo "=> SHOULD_RUN_CD: ${SHOULD_RUN_CD}"
+          }
+        }
+        stage('Get Backend ASG Information') {
+          when {
+            equals expected: 'yes', actual: SHOULD_RUN_CD
+          }
+          steps {
+            script {
+              echo "SHOULD_RUN_CD: ${SHOULD_RUN_CD}"
+              // Get BE_ASG_NAME from AWS Parameter Store
+              env.BE_ASG_NAME = sh(script: "aws ssm get-parameter --name /edulog/athena/${ENV_TYPE}/${ENV_NAME}/be_asg --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+              if(env.ENV_NAME_2 != '') {
+                env.BE_ASG_NAME_2 = sh(script: "aws ssm get-parameter --name /edulog/athena/${ENV_TYPE}/${ENV_NAME_2}/be_asg --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+              }
+            }
+          }
+        }
+        stage('Deploy to $ENV_NAME Environment') {
+          when {
+            equals expected: 'yes', actual: SHOULD_RUN_CD
+          }
+          environment {
+            ip_addresses = sh(script: '/usr/local/bin/getip_fromasg get_private_ip --name=${BE_ASG_NAME}', returnStdout: true).trim()
+            ssh_profile = "${JENKINS_HOME}/.ssh/devops.pem"
+            ssh_user = 'ubuntu'
+          }
+          steps {
+            echo "=> Deploy to Backend Instances"
+            dir('athena/deploy/backend') {
+              script {
+                env.script_file = 'deploy-single-service.sh'
+                if(service == 'athena') {
+                  env.script_file = 'deploy-group-services.sh'
+                } else {
+                  env.script_file = 'deploy-single-service.sh'
+                }
+                ip_addresses.tokenize(',[]').each { ip ->
+                  ip = ip.trim()
+                  echo "Script: ${script_file}"
+                  sh "scp -i ${ssh_profile} ./${script_file} ${ssh_user}@${ip}:/tmp"
+                  sh "ssh -i ${ssh_profile} ${ssh_user}@${ip} -t 'cd /tmp && sh ${script_file} ${service} ${service_name} ${version} ${binary_path}'"
+                  echo "Deployed to Instance ${ip}"
+                }
+              }
+            }
+          }
+          post {
+            failure {
+              echo "=> Build failure"
+              notifyGChat("${ENV_NAME}", "${service}", "${branch_name}", "${version}", "${GCHAT_TOKEN}")
+              notifySlack("${ENV_NAME}", "${service}", "${branch_name}", "${version}", "${SLACK_CHANNEL}")
+            }
+            success {
+              echo "=> Build success"
+              notifyGChat("${ENV_NAME}", "${service}", "${branch_name}", "${version}", "${GCHAT_TOKEN}")
+              notifySlack("${ENV_NAME}", "${service}", "${branch_name}", "${version}", "${SLACK_CHANNEL}")
+            }
+          }
+        }
+        stage('Deploy to $ENV_NAME_2 Environment') {
+          when {
+            equals expected: 'yes', actual: SHOULD_RUN_CD
+            not {  equals expected: '', actual: ENV_NAME_2 }
+          }
+          environment {
+            ip_addresses = sh(script: '/usr/local/bin/getip_fromasg get_private_ip --name=${BE_ASG_NAME_2}', returnStdout: true).trim()
+            ssh_profile = "${JENKINS_HOME}/.ssh/devops.pem"
+            ssh_user = 'ubuntu'
+          }
+          steps {
+            echo "=> Deploy to Backend Instances"
+            dir('athena/deploy/backend') {
+              script {
+                env.script_file = 'deploy-single-service.sh'
+                if(service == 'athena') {
+                  env.script_file = 'deploy-group-services.sh'
+                } else {
+                  env.script_file = 'deploy-single-service.sh'
+                }
+                ip_addresses.tokenize(',[]').each { ip ->
+                  ip = ip.trim()
+                  echo "Script: ${script_file}"
+                  sh "scp -i ${ssh_profile} ./${script_file} ${ssh_user}@${ip}:/tmp"
+                  sh "ssh -i ${ssh_profile} ${ssh_user}@${ip} -t 'cd /tmp && sh ${script_file} ${service} ${service_name} ${version} ${binary_path}'"
+                  echo "Deployed to Instance ${ip}"
+                }
+              }
+            }
+          }
+          post {
+            failure {
+              echo "=> Build failure"
+              notifyGChat("${ENV_NAME_2}", "${service}", "${branch_name}", "${version}", "${GCHAT_TOKEN}")
+              notifySlack("${ENV_NAME_2}", "${service}", "${branch_name}", "${version}", "${SLACK_CHANNEL}")
+            }
+            success {
+              echo "=> Build success"
+              notifyGChat("${ENV_NAME_2}", "${service}", "${branch_name}", "${version}", "${GCHAT_TOKEN}")
+              notifySlack("${ENV_NAME_2}", "${service}", "${branch_name}", "${version}", "${SLACK_CHANNEL}")
+            }
+          }
+        }
+        stage('Create BuildVersion for Backend -> AWS AMI') {
+          when { 
+            equals expected: 'yes', actual: SHOULD_RUN_CD
+            equals expected: 'release', actual: ENV_NAME 
+          }
+          environment {
+            IMAGE_BUILD_VERSION = "BE-${branch_name}-${BUILD_NUMBER}"
+            SERVICE_VERSIONS = sh(script: "ssh -t release_instance '/usr/local/bin/get-service-versions'", returnStdout: true).trim()
+            INSTANCE_ID = "${ATH_RELEASE_INSTANCE_ID}"
+          }
+          steps {
+            echo "==> Create AWS AMI from BE Release Environment"
+            script {
+              env.IMAGE_ID = sh(script: "create-be-build-version ${INSTANCE_ID} ${service} ${IMAGE_BUILD_VERSION} ${SERVICE_VERSIONS}", returnStdout: true).trim()
+            }
+          }
+          post {
+            failure {
+              echo "=> Build failure"
+              notifyGChat("Create BUILD_VERSION", "${service}", "${branch_name}", "${IMAGE_BUILD_VERSION}", "${GCHAT_TOKEN_BUILDVERSION}")
+              notifySlack("Create BUILD_VERSION", "${service}", "${branch_name}", "${IMAGE_BUILD_VERSION}", "${SLACK_CHANNEL_BUILDVERSION}")
+            }
+            success {
+              echo "=> Build success"
+              notifyGChat("Create BUILD_VERSION", "${service}", "${branch_name}", "${IMAGE_BUILD_VERSION}", "${GCHAT_TOKEN_BUILDVERSION}")
+              notifySlack("Create BUILD_VERSION", "${service}", "${branch_name}", "${IMAGE_BUILD_VERSION}", "${SLACK_CHANNEL_BUILDVERSION}")
+            }
+          }
+        }
+        stage('Deploy to EKS Environment') {
+          when { anyOf { 
+            branch 'development-ktvn'
+            branch 'ktvn'
+            branch 'development-fr'
+            branch 'fr'
+            branch 'develop'
+            branch 'master'
+            branch 'main'
+          } }
+          steps {
+            echo "=> Run CD Process to EKS for branch ${branch_name}"
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              build job: "${JOB_DEPLOY_K8S}", propagate: false, parameters: [
+                string(name: 'branch_name', value: "${branch_name}"),
+                string(name: 'service', value: "${service}"),
+                string(name: 'binary_path', value: "${binary_path}"),
+                string(name: 'version', value: "${version}")]
+            }
+          }
+        }
+        // stage('Deploy to EKS Release Environment') {
+        //   steps {
+        //     script {
+        //       // check if branch_name match pattern "release/*" then set branch_name
+        //       def releasePattern = ~/release\/.+/
+        //       def matchRelease = releasePattern.matcher(BRANCH_NAME).matches()
+        //       if(matchRelease) {
+        //         echo "=> Run CD Process to EKS  for branch ${BRANCH_NAME}"
+        //         catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+        //           build job: "${JOB_DEPLOY_K8S}", parameters: [
+        //             string(name: 'branch_name', value: "${branch_name}"),
+        //             string(name: 'service', value: "${service}"),
+        //             string(name: 'binary_path', value: "${binary_path}"),
+        //             string(name: 'version', value: "${version}")]
+        //         }
+        //       }
+        //     }
+        //   }
+        // }
+        // stage('Deploy to EKS Hotfix Environments') {
+        //   steps {
+        //     script {
+        //       // check if branch_name match pattern "release/*" then set branch_name
+        //       def releasePattern = ~/hotfix\/.+/
+        //       def matchRelease = releasePattern.matcher(BRANCH_NAME).matches()
+        //       if(matchRelease) {
+        //         echo "=> Run CD Process for branch ${BRANCH_NAME}"
+        //         catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+        //           build job: "${JOB_DEPLOY_K8S}", parameters: [
+        //             string(name: 'branch_name', value: "${branch_name}"),
+        //             string(name: 'service', value: "${service}"),
+        //             string(name: 'binary_path', value: "${binary_path}"),
+        //             string(name: 'version', value: "${version}")]
+        //         }
+        //       }
+        //     }
+        //   }
+        // }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo "=> Cleanup Workspace after finished!"
+      cleanWs()
+    }
+  }
+}

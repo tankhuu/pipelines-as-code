@@ -1,0 +1,159 @@
+// Function Configure Package for deployment to Tenant
+def configurePackage(env, configFileName, commit, env_type) {
+  dir('dist/assets') {
+    sh "cp ${configFileName}.json /tmp/${configFileName}.${env}.json"
+    sh "update-fe-config ${configFileName} ${commit} ${env} ${env_type}"
+    sh "cp /tmp/${configFileName}.${env}.json ${configFileName}.json"
+    sh "cat ${configFileName}.json"
+  }
+}
+
+// Function deploy Frontend to Tenant
+def deployToTenant(env_type, domain, cloudfrontId) {
+  echo "=> Deploy to ${domain}"
+  AWS_CMD = 'aws'
+  if(env_type == 'prod') {
+    AWS_CMD = 'aws --profile prod'
+  }
+  if(domain == 'athena-puydedome.athena-nonprod.com') {
+    AWS_CMD = 'aws --region eu-west-3'
+  }
+  dir('dist') {
+    echo "=> Remove files on s3://${domain}"
+    sh "${AWS_CMD} s3 rm s3://${domain} --recursive"
+    echo "=> Upload files to s3://${domain}"
+    sh "${AWS_CMD} s3 cp --acl public-read --recursive . s3://${domain}/"
+    echo "=> Set Cache-Control for Service Worker"
+    sh "${AWS_CMD} s3 cp --acl public-read --cache-control max-age=0 ./index.html s3://${domain}/"
+    sh "${AWS_CMD} s3 cp --acl public-read --cache-control max-age=0 ./ngsw-worker.js s3://${domain}/"
+    echo "=> Invalidate Cloudfront ${cloudfrontId}"
+    sh "${AWS_CMD} cloudfront create-invalidation --distribution-id ${cloudfrontId} --paths \"/*\""
+  }
+}
+
+pipeline {
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'env_type', choices: ['nonprod', 'prod'], description: 'Type of Environment to take snapshot. Currently supports for nonprod only.')
+    string(name: 'artifact_path', description: 'S3 Full Path of the Artifact to deploy.')
+    choice(name: 'environment', 
+      choices: [
+        'development-ktvn', 'demoleg', 'smokeleg', 'puydedome', 'release-2', 'opt-release', 'opt-release-2', 
+        'frenchtown-transfers', 'frenchtown-demo', 'midland', 'frenchtown-sales', 'release'
+      ], 
+      description: 'Environment to deploy. Default is deadpool-demo.')
+    string(name: 'version', description: 'Version to add into UI.')
+  }
+
+  environment {
+    CONFIG_FILE = 'systemconfig'
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Pull Artifact') {
+          steps {
+            sh 'aws s3 cp ${artifact_path} .'
+            sh 'tar zxvf *.tar.gz'
+          }
+        }
+        stage('Deploy to list of specific environments') {
+          steps {
+
+            echo "=> Get Domain of Environment"
+            script {
+              switch(env_type) {
+                case 'prod':
+                  env.BASE_DOMAIN = 'etstack.io'
+                  break
+                case 'nonprod':
+                  env.BASE_DOMAIN = 'athena-nonprod.com'
+                  break
+                default:
+                  env.BASE_DOMAIN = 'athena-nonprod.com'
+                  break
+              }
+            }
+            
+            echo "=> Get CloudFrontId of Environment"
+            script {
+              env.ENV_NAME = "${environment}"
+              env.DOMAIN = "${environment}.${BASE_DOMAIN}"
+              switch(environment) {
+                case 'demoleg':
+                  env.DOMAIN = "athena-${environment}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E3IRPT5SPYKNYM'
+                  break
+                case 'smokeleg':
+                  env.CF_ID = 'E2V9HDF0IYB90I'
+                  break
+                case 'puydedome':
+                  env.DOMAIN = "athena-${environment}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E3TUP4IOAOJBG8'
+                  break
+                case 'release':
+                  env.CF_ID = 'E37KC7S3NROET7'
+                  break
+                case 'release-2':
+                  env.CF_ID = 'E2SIZQ7QT5S3MA'
+                  break
+                case 'opt-release':
+                  env.CF_ID = 'EQJIRP4LU9YFR'
+                  break
+                case 'opt-release-2':
+                  env.CF_ID = 'E2H3FOY5ZDQ12V'
+                  break
+                case 'frenchtown-transfers':
+                  env.CF_ID = 'E1E5IJYK4GJ2LX'
+                  break
+                case 'frenchtown-demo':
+                  env.CF_ID = 'EA9V1YERLPBER'
+                  break
+                case 'midland':
+                  env.CF_ID = 'E1JGBO4BCZIL7C'
+                  break
+                 case 'frenchtown-sales':
+                  env.CF_ID = 'E2N2WG1SWC15DM'
+                  break
+                 case 'development-ktvn':
+                  env.ENV_NAME = "${environment}-eks"
+                  env.DOMAIN = "${environment}-eks.${BASE_DOMAIN}"
+                  env.CF_ID = 'E2ZST9WNG5UC4O'
+                  break
+                default:
+                  env.CF_ID = ''
+                  break
+              }
+            }
+
+            echo "=> Configure Dev Environment"
+            configurePackage("${environment}", "${CONFIG_FILE}", "${version}", "${env_type}")
+    
+            echo "=> Deploy athena-${params.environment}.${DOMAIN} with CF_ID: ${CF_ID}"
+            deployToTenant("${env_type}", "${DOMAIN}", "${CF_ID}")
+          }
+        }
+      }
+    }
+  }
+
+   post {
+     always {
+       cleanWs()
+     }
+   }
+}

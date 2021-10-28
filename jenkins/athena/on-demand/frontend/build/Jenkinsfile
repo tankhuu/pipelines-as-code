@@ -1,0 +1,85 @@
+// JobName: ath-checkout-git-repo
+pipeline {
+  agent { label 'cluster-slave' }
+
+  environment {
+    GIT_REPO = 'git@github.com:eduloginc/EduLog-AthenaUI-v1_2.git'
+    GIT_CREDS = 'eduloginc-git-tankhuu'
+    ARTIFACT_PATH = 's3://edulog-athena-artifacts/ondemand/ui'
+    LOCKER = 'ATH_FE_BUILDER'
+  }
+
+  parameters {
+    choice(name: 'type', choices: ['branch', 'tag'], description: 'Git Type of checkout. Default is checkout from branch')
+    string(name: 'specifier', defaultValue: 'dev', description: 'Git Branch/Tag specifier to checkout code. Default is checkout from dev branch.')
+    choice(name: 'environment', choices: ['shenoy-test', 'deadpool', 'deadpool-demo', 'athena-virginia-beach-va-static', 'athena-virginia-beach-staticdynamic', 'chiefleschi-wa-2', 'frenchtown-sales', 'release'], description: 'Environment to deploy. Default is deadpool.')
+  }
+
+  stages{
+    stage("Get Branch Specifier") {
+      when { equals expected: 'branch', actual: params.type }
+      steps {
+        script {
+          env.GIT_SPEC = "refs/heads"
+        }
+      }
+    }
+    stage("Get Tag Specifier") {
+      when { equals expected: 'tag', actual: params.type }
+      steps {
+        script { 
+          env.GIT_SPEC = "refs/tags"
+        }
+      }
+    }
+    stage("Checkout") {
+      steps {
+        echo "=> Checkout from specifier: ${env.GIT_SPEC}/${params.specifier}"
+        script {
+          def scmVars = checkout([
+            $class: 'GitSCM', 
+            branches: [[name: "${env.GIT_SPEC}/${params.specifier}"]],
+            userRemoteConfigs: [[
+              url: "${GIT_REPO}", 
+              credentialsId: "${GIT_CREDS}"
+              ]]
+          ])
+          // Set env GIT_COMMIT & SHORT_COMMIT & BUILD_VERSION
+          env.GIT_COMMIT = scmVars.GIT_COMMIT
+          env.SHORT_COMMIT = scmVars.GIT_COMMIT.substring(0,7)
+        }
+      }
+    }
+    stage("Build") {
+      steps {
+        sh 'npm install > /dev/null'
+        sh 'npm run postinstall'
+        // Make sure building angularjs jobs not run at the same time
+        lock("${LOCKER}") {
+          echo "==> Building..."
+          sh 'npm run build:prod'
+        }
+      }
+    }
+    stage("Artifacts") {
+      steps {
+        echo "=> Create Artifact"
+        sh 'tar zcvf ${GIT_COMMIT}.tar.gz dist/'
+        echo "=> Upload package Artifact to ${ARTIFACT_PATH}/"
+        sh "aws s3 cp ${GIT_COMMIT}.tar.gz ${ARTIFACT_PATH}/"
+      }
+    }
+  }
+  post{
+    always {
+      echo "========always========"
+      // cleanWs()
+    }
+    success {
+      echo "========pipeline executed successfully ========"
+    }
+    failure {
+      echo "========pipeline execution failed========"
+    }
+  }
+}

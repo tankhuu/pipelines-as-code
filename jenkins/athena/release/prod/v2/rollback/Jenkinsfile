@@ -1,0 +1,327 @@
+// Notify to channel
+def notifyGChat(siteUrl, newFeVersion, newBeVersion, newDbVersion, currentFeVersion, currentBeVersion, currentDbVersion, snapshotPath, executor, channel) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "Rollback: *${currentBuild.result}* \nEnvType: Prod \nSite: ${siteUrl} \n----- \nTo Versions: \nFE: $newFeVersion \nBE: $newBeVersion \nDB: $newDbVersion \n----- \nFrom Versions: \nFE: $currentFeVersion \nBE: $currentBeVersion \nDB: $currentDbVersion \nSnapshot: $snapshotPath \n----- \nExecutor: $executor\nDuration: ${DURATION}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack(siteUrl, newFeVersion, newBeVersion, newDbVersion, currentFeVersion, currentBeVersion, currentDbVersion, snapshotPath, executor, channel) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *Rollback*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Rollback: *${currentBuild.result}* \nEnvType: Prod \nSite: ${siteUrl} \n----- \nTo Versions: \nFE: $newFeVersion \nBE: $newBeVersion \nDB: $newDbVersion \n----- \nFrom Versions: \nFE: $currentFeVersion \nBE: $currentBeVersion \nDB: $currentDbVersion \nSnapshot: $snapshotPath \n----- \nExecutor: $executor\nDuration: ${DURATION}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+// Function Configure Package for deployment to Tenant
+def configurePackage(siteName, version, envType) {
+  def configFileName = 'systemconfig'
+  dir('dist/assets') {
+    sh "cp ${configFileName}.json /tmp/${configFileName}.${siteName}.json"
+    sh "update-fe-config ${configFileName} ${version} ${siteName} ${envType}"
+    sh "cp /tmp/${configFileName}.${siteName}.json ${configFileName}.json"
+  }
+}
+
+// Function deploy Frontend to Tenant
+def deployToSite(command, domain, cloudfrontId) {
+  dir('dist') {
+    echo "=> Remove files on s3://${domain}"
+    sh "${command} s3 rm s3://${domain} --recursive > /dev/null"
+    echo "=> Upload files to s3://${domain}"
+    sh "${command} s3 cp --acl public-read --recursive . s3://${domain}/ > /dev/null"
+    echo "=> Set Cache-Control for Service Worker"
+    sh "${command} s3 cp --acl public-read --cache-control max-age=0 ./index.html s3://${domain}/"
+    sh "${command} s3 cp --acl public-read --cache-control max-age=0 ./ngsw-worker.js s3://${domain}/"
+    echo "=> Invalidate Cloudfront ${cloudfrontId}"
+    sh "${command} cloudfront create-invalidation --distribution-id ${cloudfrontId} --paths \"/*\""
+  }
+}
+
+node {
+  beReleasesList = sh (script: 'cat ${JENKINS_HOME}/athena/versions/release_backend.txt', returnStdout: true).trim()
+  feReleasesList = sh (script: 'cat ${JENKINS_HOME}/athena/versions/release_frontend.txt', returnStdout: true).trim()
+  sitesList = sh (script: 'cat ${JENKINS_HOME}/athena/sites/prod.sites.txt', returnStdout: true).trim()
+}
+
+pipeline {
+  agent any
+  
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'siteName', choices: "${sitesList}", description: 'SiteName to take DB snapshot from.')
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+
+      environment {
+        envType = 'prod'
+        FE_DOMAIN = 'etstack.io'
+
+        GCHAT_TOKEN = "${GCHAT_TOKEN_ATH_RELEASE}"
+        SLACK_CHANNEL = "${SLACK_ATH_RELEASE}"
+      }
+      when {
+        expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.executor = "${BUILD_USER_ID}"
+              }
+              if(executor == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Get Info for envType') {
+          steps {
+            script {
+              env.AWS_CMD = 'aws'
+              if(envType == 'prod') {
+                env.AWS_CMD = 'aws --profile prod'
+              } else {
+                env.AWS_CMD = 'aws'
+              }
+            }
+          }
+        }
+
+        stage('Get Last Frontend & Backend Version') {
+          steps {
+            script {
+              env.feVersion = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${envType}/deployment/${siteName}/last/fe_version --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+              env.beVersion = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${envType}/deployment/${siteName}/last/be_version --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+            }
+          }
+        }
+
+        // Get Versions information Before Deployment
+        stage('Collect current Site Versions') {
+          steps {
+            dir('scripts/python') {
+              script {
+                env.currentFeVersion = sh(script: "python3 getFeVersion.py --envType=${envType} --siteName=${siteName}", returnStdout: true).trim()
+                env.currentBeVersion = sh(script: "python3 getBeVersion.py --envType=${envType} --siteName=${siteName}", returnStdout: true).trim()
+                env.currentDbVersion = sh(script: "python3 getDbVersion.py --envType=${envType} --siteName=${siteName}", returnStdout: true).trim()
+              }
+              echo "Current Frontend Version: $currentFeVersion"
+              echo "Current Backend Version: $currentBeVersion"
+              echo "Current Database Version: $currentDbVersion"
+            }
+            dir('scripts/bash') {
+              script {
+                name = "/edulog/athena/${envType}/deployment/${siteName}/rollback/fe_version"
+                value = "$currentFeVersion"
+                type = "String"
+                sh "/bin/sh add-ssm-param.prod.sh $name $value $type"
+
+                name = "/edulog/athena/${envType}/deployment/${siteName}/rollback/be_version"
+                value = "$currentBeVersion"
+                type = "String"
+                sh "/bin/sh add-ssm-param.prod.sh $name $value $type"
+
+                name = "/edulog/athena/${envType}/deployment/${siteName}/rollback/db_version"
+                value = "$currentDbVersion"
+                type = "String"
+                sh "/bin/sh add-ssm-param.prod.sh $name $value $type"
+              }
+            }
+          }
+        }
+
+        // Snapshot DB before Deployment
+        stage('Take Snapshot Before Rolling back') {
+          environment {
+            RDS_EP = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${envType}/${siteName}/rds_endpoint --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+            DB_PASS = sh(script: "${AWS_CMD} ssm get-parameter --with-decryption --name /edulog/athena/${envType}/${siteName}/db_pass --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+            S3_BUCKET_NAME = 'edulog-athena-backup'
+          }
+          steps {
+            script {
+              env.runDate = sh(script: "echo `date +%Y%m%d-%H%M%S`", returnStdout: true).trim()
+            }
+            dir('scripts/bash') {
+              echo "=> Run script take snapshot"
+              // Default Snapshot file name is: <db_name>-<environment>.<YYYYMMDD-HHmm>
+              sh "/bin/sh snapshot.sh ${envType} ${siteName} ${RDS_EP} ${DB_PASS} ${S3_BUCKET_NAME} ${runDate} > /dev/null"
+              script {
+                name = "/edulog/athena/${envType}/deployment/${siteName}/rollback/db_snapshot"
+                value = "s3://${S3_BUCKET_NAME}/athena/database/${envType}/${siteName}/Athena-${siteName}.${runDate}.bak"
+                type = "String"
+                sh "/bin/sh add-ssm-param.prod.sh $name $value $type"
+              }
+            }
+          }
+        }
+
+        stage('Restore Snapshot from Last status') {
+          environment {
+            RDS_EP = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${envType}/${siteName}/rds_endpoint --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+            DB_PASS = sh(script: "${AWS_CMD} ssm get-parameter --with-decryption --name /edulog/athena/${envType}/${siteName}/db_pass --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+            SNAPSHOT_PATH = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${envType}/deployment/${siteName}/last/db_snapshot --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+          }
+          steps {
+            dir('scripts/bash') {
+              script {
+                env.snapshotPath = "$SNAPSHOT_PATH"
+              }
+              sh "/bin/sh restore.sh ${RDS_EP} ${DB_PASS} ${SNAPSHOT_PATH} > /dev/null"
+            }
+          }
+        }
+
+        // Backend Deployment
+        stage('Backend Rollback') {
+          environment {
+            ASG_NAME = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${envType}/${siteName}/be_asg --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+          }
+          stages {
+            stage('Set Max-Size to 2 on BE AWS Autoscaling Group Before Deployment') {
+              steps {
+                sh "${AWS_CMD} autoscaling update-auto-scaling-group --auto-scaling-group-name ${ASG_NAME} --max-size 2"
+              }
+            }
+            stage('Deploy Backend') {
+              steps {
+                echo "=> Deploy AMI to BE Autoscaling Group"
+                sh '''#!/bin/bash
+                  /usr/local/bin/deploy-prod ${siteName} ${beVersion}
+                '''
+              }
+            }
+            stage('Wait for autoscaling group in-service') {
+              steps {
+                sh 'sleep 600'
+              }
+            }
+            stage('Check Service Status') {
+              environment {
+                ip_addresses = sh(script: '/usr/local/bin/getip_fromasg get_private_ip --name=${ASG_NAME}', returnStdout: true).trim()
+                ssh_profile = "${JENKINS_HOME}/.ssh/devops.pem"
+                ssh_user = 'ubuntu'
+                script_file = 'check_service_status.sh'
+              }
+              steps {
+                dir('scripts/bash') {
+                  script {
+                    ip_addresses.tokenize(',[]').each { ip ->
+                      ip = ip.trim()
+                      sh "cat ./service_list.txt"
+                      sh "scp -i ${ssh_profile} ./service_list.txt ${ssh_user}@${ip}:/tmp"
+                      sh "scp -i ${ssh_profile} ./check_service_status.sh ${ssh_user}@${ip}:/tmp"
+                      sh "ssh -i ${ssh_profile} ${ssh_user}@${ip} -t 'cd /tmp && sh ${script_file}'"
+                    }
+                  }
+                }
+              }
+            }
+        
+            stage('Set Max-Size to 1 on BE AWS Autoscaling Group After Deployment') {
+              steps {
+                sh "${AWS_CMD} autoscaling update-auto-scaling-group --auto-scaling-group-name ${ASG_NAME} --max-size 1"
+              }
+            }
+          }
+        }
+
+        // Frontend Deployment
+        stage('Frontend Rollback') {
+          environment {
+            CF_ID = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${envType}/${siteName}/fe_cf_id --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+          }
+          stages {
+            stage('Pull Package') {
+              steps {
+                echo "=> Download artifact from Athena AWS Account"
+                sh 'aws s3 cp s3://${ATH_S3_ARTIFACTS_BUCKET}/frontend/release/${feVersion}.tar.gz . > /dev/null'
+                sh 'tar zxvf ${feVersion}.tar.gz > /dev/null'
+              }
+            }
+            stage("Deploy Frontend to Site") {
+              steps {
+                echo "=> Configure Package"
+                configurePackage("${siteName}", "${feVersion}", "${envType}")
+
+                echo "=> Deploy to Site"
+                deployToSite("${AWS_CMD}", "${siteName}.${FE_DOMAIN}", "${CF_ID}")
+              }
+            }
+          }
+        }
+
+        stage('Get new Version') {
+          environment {
+            siteUrl = "https://$siteName.$FE_DOMAIN"
+          }
+          steps {
+            dir('scripts/python') {
+              script {
+                env.newFeVersion = sh(script: "python3 getFeVersion.py --envType=${envType} --siteName=${siteName}", returnStdout: true).trim()
+                env.newBeVersion = sh(script: "python3 getBeVersion.py --envType=${envType} --siteName=${siteName}", returnStdout: true).trim()
+                env.newDbVersion = sh(script: "python3 getDbVersion.py --envType=${envType} --siteName=${siteName}", returnStdout: true).trim()
+              }
+              echo "New Frontend Version: $newFeVersion"
+              echo "New Backend Version: $newBeVersion"
+              echo "New Database Version: $newDbVersion"
+            }
+          }
+          post {
+            success {
+              echo "Deploy success for $siteName"
+              notifyGChat("$siteUrl", "$newFeVersion", "$newBeVersion", "$newDbVersion","$currentFeVersion", "$currentBeVersion", "$currentDbVersion", "$snapshotPath", "$executor", "$GCHAT_TOKEN")
+              notifySlack("$siteUrl", "$newFeVersion", "$newBeVersion", "$newDbVersion","$currentFeVersion", "$currentBeVersion", "$currentDbVersion", "$snapshotPath", "$executor", "$SLACK_CHANNEL")
+            }
+            failure {
+              echo "Deploy failure for $siteName"
+              notifyGChat("$siteUrl", "$newFeVersion", "$newBeVersion", "$newDbVersion","$currentFeVersion", "$currentBeVersion", "$currentDbVersion", "$snapshotPath", "$executor", "$GCHAT_TOKEN")
+              notifySlack("$siteUrl", "$newFeVersion", "$newBeVersion", "$newDbVersion","$currentFeVersion", "$currentBeVersion", "$currentDbVersion", "$snapshotPath", "$executor", "$SLACK_CHANNEL")
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo '==> Clean up built after run'
+      cleanWs()
+      
+    }
+    success {
+      echo 'Job run success'
+    }
+    failure {
+      echo 'Job run failed'
+    }
+  }
+}

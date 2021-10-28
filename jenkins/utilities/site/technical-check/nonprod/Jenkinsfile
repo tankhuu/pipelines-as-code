@@ -1,0 +1,90 @@
+node {
+    sitesList = sh (script: 'cat ${JENKINS_HOME}/athena/sites/nonprod.sites.txt', returnStdout: true).trim()
+}
+
+pipeline{
+    agent any
+
+    parameters {
+        booleanParam(name: 'refresh', defaultValue: false, description: 'Update list sites on Nonprod')
+        choice(name: 'siteName', choices: "${sitesList}", description: "Site need to be checked")
+    }
+
+    environment {
+        envType = 'nonprod'
+    }
+
+    stages {
+        stage('Read Jenkins file') {
+            when {
+                expression{ return params.refresh == true}
+            }
+            steps {
+                echo("Refresed list of sites")
+            }
+        }
+        stage('Run Jenkins job') {
+            when {
+                expression {return params.refresh == false}
+            }
+            stages {
+                stage ('Verify Authorization') {
+                    steps {
+                        script {
+                            // Get Build user
+                            wrap([$class: 'BuildUser']) {
+                                env.CREATOR = "${BUILD_USER_ID}"
+                            }
+                            if(CREATOR == 'anonymous') {
+                                error('You have to login to run this job!!!')
+                            }
+                        }
+                    }
+                }
+                stage ('Get AWS_CMD based on env_type') {
+                    steps {
+                        script {
+                            env.AWS_CMD = 'aws'
+                            if(envType == 'prod') {
+                                env.AWS_CMD = 'aws --profile prod'
+                            } else {
+                                env.AWS_CMD = 'aws'
+                            }
+
+                            //Get BE_ASG_NAME from AWS Parameter Store.
+                            env.BE_ASG_NAME = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${envType}/${siteName}/be_asg --output text --query 'Parameter.[Value]'",returnStdout: true).trim()
+                        }
+                    }
+                }
+                stage ('Technical check') {
+                    environment {
+                        //tenandId = sh(script: "${AWS_CMD} cloudformation describe-stacks --stack-name athena-${siteName} --output yaml --query "Stacks[0].Parameters[?ParameterKey=='TenantId'].ParameterValue" --output text", returnStdout: true).trim()
+                        be_ip_addresses = sh(script: '/usr/local/bin/get_ip_fromasg get_private_ip --name=${BE_ASG_NAME}', returnStdout: true).trim()
+                        ssh_profile = "${JENKINS_HOME}/.ssh/devops.pem"
+                        ssh_user = 'ubuntu'
+                    }
+                    steps {
+                        script {
+                            be_ip_addresses.tokenize(',[]').each { ip ->
+                                ip = ip.trim()
+                                sh "sh /usr/local/bin/technical_check/services_check.sh ${siteName} ${ip} ${ssh_profile}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    post {
+    always {
+      echo "=> Clean Workspace after run"
+      cleanWs()
+    }
+    success {
+      echo "==> Build Success"
+    }
+    failure {
+      echo "==> Build Failure"
+    }
+  }
+}

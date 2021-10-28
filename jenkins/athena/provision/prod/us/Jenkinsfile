@@ -1,0 +1,435 @@
+
+// Notify to channel
+def notifyGChat(siteName, envType, feVersion, beVersion, wqVersion, infrasVersion, room, creator) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "Status: ${currentBuild.result}\nAthena New Site Provision\nEnvType: ${envType}\nSiteName: ${siteName}\nFEVersion: ${feVersion}\nBEVersion: ${beVersion}\nWQVersion: ${wqVersion}\nInfrasVersion: ${infrasVersion}\nDuration: ${DURATION}\nCreator: ${creator}",
+    token: "${room}", threadByJob: true
+}
+
+// Function Configure Package for deployment to Tenant
+def configurePackage(env, version, env_type) {
+  def configFileName = 'systemconfig'
+  dir('dist/assets') {
+    sh "cp ${configFileName}.json /tmp/${configFileName}.${env}.json"
+    sh "update-fe-config ${configFileName} ${version} ${env} ${env_type}"
+    sh "cp /tmp/${configFileName}.${env}.json ${configFileName}.json"
+    sh "cat ${configFileName}.json"
+  }
+}
+def configureWQPackage(env, version, env_type) {
+  def configFileName = 'config'
+  dir('dist/web-query/assets') {
+    sh "cp ${configFileName}.json /tmp/${configFileName}.${env}.json"
+    sh "update-fe-webquery-config ${configFileName} ${version} ${env} ${env_type}"
+    sh "cp /tmp/${configFileName}.${env}.json ${configFileName}.json"
+    sh "cat ${configFileName}.json"
+  }
+}
+
+// Function deploy Frontend to Tenant
+def deployToTenant(env_type, domain) {
+  echo "=> Deploy to ${domain}"
+  AWS_CMD = 'aws'
+  if(env_type == 'prod') {
+    AWS_CMD = 'aws --profile prod'
+  }
+  dir('dist') {
+    echo "=> Remove files on s3://${domain}"
+    sh "${AWS_CMD} s3 rm s3://${domain} --recursive"
+    echo "=> Upload files to s3://${domain}"
+    sh "${AWS_CMD} s3 cp --acl public-read --recursive . s3://${domain}/"
+    echo "=> Set Cache-Control for Service Worker"
+    sh "${AWS_CMD} s3 cp --acl public-read --cache-control max-age=0 ./index.html s3://${domain}/"
+    sh "${AWS_CMD} s3 cp --acl public-read --cache-control max-age=0 ./ngsw-worker.js s3://${domain}/"
+  }
+}
+def deployWQToTenant(env_type, domain) {
+  echo "=> Deploy to ${domain}"
+  AWS_CMD = 'aws'
+  if(env_type == 'prod') {
+    AWS_CMD = 'aws --profile prod'
+  }
+  dir('dist/web-query') {
+    echo "=> Remove files on s3://${domain}"
+    sh "${AWS_CMD} s3 rm s3://${domain} --recursive"
+    echo "=> Upload files to s3://${domain}"
+    sh "${AWS_CMD} s3 cp --acl public-read --recursive . s3://${domain}/"
+  }
+}
+
+node {
+    beReleasesList = sh (script: 'cat ${JENKINS_HOME}/athena/versions/release_backend.txt', returnStdout: true).trim()
+    wqReleasesList = sh (script: 'cat ${JENKINS_HOME}/athena/versions/release_webquery.txt', returnStdout: true).trim()
+    feReleasesList = sh (script: 'cat ${JENKINS_HOME}/athena/versions/release_frontend.txt', returnStdout: true).trim()
+    infrasReleasesList = sh (script: 'cat ${JENKINS_HOME}/athena/versions/release_infras.txt', returnStdout: true).trim()
+
+}
+pipeline {
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'INFRAS_VERSION', choices: "${infrasReleasesList}", description: 'Release Version of Infrastructure. Default is latest Version, Eg. v1.1.0')
+    choice(name: 'REGION', choices: ['us-east-2'])
+    string(name: 'TENANT', description: 'Tenant should not be duplicated with the existing tenants!!! Tenant must contain only [a-z] and hyphen! No uppercase!!')
+    string(name: 'TENANT_ID', defaultValue: '', description: 'Tenant ID to create environment. It is required when IS_NEW_TENANT is No!')
+    choice(name: 'FE_RELEASE_VERSION', choices: "${feReleasesList}", description: 'Release Version of Backend to get AMI for Deployment Backend Servicess. Ex: BE-x.x.x')
+    choice(name: 'BE_RELEASE_VERSION', choices: "${beReleasesList}", description: 'Release Version of Backend to get AMI for Deployment Backend Servicess. Ex: BE-x.x.x')
+    choice(name: 'WQ_RELEASE_VERSION', choices: "${wqReleasesList}", description: 'Release Version of WebQuery. Eg. 1.0.0')
+    string(name: 'DB_SNAPSHOT_ID', defaultValue: 'arn:aws:rds:us-east-2:696952606624:snapshot:athena-base-rds-2-090-be-1-29', description: 'RDS Snapshot ID to deploy base database into RDS')
+    password(name: 'DB_MASTER_PASSWORD', defaultValue: '2ASU0sGt9UXz', description: 'Password for user postgres of RDS')
+    choice(name: 'ENV_SIZE', choices: ['Small', 'Medium', 'Large'], description: 'Size of the Environment. Default is Small')
+  }
+
+  environment {
+    PROJECT = 'athena'
+    ENV = 'prod'
+    AUTHOR = 'devops'
+    STACK_NAME = "${PROJECT}-${params.TENANT}"
+    VPC_STACK_NAME = 'edulogvn-prod-vpc'
+    KEYPAIR = 'edulogvn-devops'
+    DOMAIN = 'etstack.io'
+    HOSTEDZONE_ID = 'Z12KP7UYAVP23S'
+    SSL_CERTIFICATE_ARN = 'arn:aws:acm:us-east-1:690893158275:certificate/49df7bb8-29c8-4197-a3bb-f9ca2b2c7b99'
+    BE_DOMAIN = 'karrostech.net'
+    BE_HOSTEDZONE_ID = 'Z33NWCVN5UFMNZ'
+    BE_SSL_CERTIFICATE_ARN = 'arn:aws:acm:us-east-2:690893158275:certificate/9978ae1d-16b0-4162-9add-3fb57083d06d'
+    CQ_AMI_ID = 'ami-0b2be9376531ee6f6'
+    // CLOUD CONFIGURATION
+    KARROS_GATEWAY = 'athenagateway-p01-prod.usw1.karrostech.net'
+    KEYCLOAK_DOMAIN = 'accounts.karrostech.net'
+    KEYCLOAK_ID = 'athena'
+    KEYCLOAK_SECRET = '2224875d-7c29-430f-8e11-471be0499782'
+    KAFKA_BROKERS = 'b-2.athenamsk.isix5e.c3.kafka.us-east-2.amazonaws.com:9092,b-1.athenamsk.isix5e.c3.kafka.us-east-2.amazonaws.com:9092'
+    ZOOKEEPER_BROKERS = 'z-2.athenamsk.isix5e.c3.kafka.us-east-2.amazonaws.com:2181,z-3.athenamsk.isix5e.c3.kafka.us-east-2.amazonaws.com:2181,z-1.athenamsk.isix5e.c3.kafka.us-east-2.amazonaws.com:2181'
+    DEBEZIUM_CONTROLLER_API = 'https://hguv82zz19.execute-api.us-east-2.amazonaws.com/prod/controller'
+    DEBEZIUM_CONTROLLER_KEY = 'mPa6WrTXuR5yhcbRypLQF5qsvN60qHptajbhqTvF'
+    // DEVOPS BUCKET 
+    S3_DEVOPS = 'edulog-athena-prod-devops'
+    // ARTIFACTS BUCKET
+    S3_ARTIFACTS = 'edulog-athena-artifacts'
+    S3_ARTIFACTS_PREFIX = 'frontend/release'
+    S3_ARTIFACTS_PREFIX_WQ = 'frontend/webquery/release'
+    FE_CONFIG_FILE = 'systemconfig'
+    // TEMPLATE DIRECTORY
+    MASTER_TEMPLATE = "cloudformation/athena/templates/athena.yml"
+    OUTPUT_MASTER_TEMPLATE = "athena.${params.TENANT}.yaml"
+    // AWS COMMANDS
+    AWS_CMD = '/usr/local/bin/aws --profile prod'
+
+    // ENVIRONMENT SIZES
+    // SMALL
+    SMALL_BE = 'm5.xlarge'
+    SMALL_CQ = 't3.small'
+    SMALL_RDS = 'db.t3.medium'
+    SMALL_RDS_STORAGE = '50'
+    SMALL_RDS_MAX_STORAGE = '100'
+    // MEDIUM
+    MEDIUM_BE = 'm5.2xlarge'
+    MEDIUM_CQ = 't3.medium'
+    MEDIUM_RDS = 'db.m5.large'
+    MEDIUM_RDS_STORAGE = '50'
+    MEDIUM_RDS_MAX_STORAGE = '100'
+    // LARGE
+    LARGE_BE = 'm5.4xlarge'
+    LARGE_CQ = 'm5.large'
+    LARGE_RDS = 'db.m5.xlarge'
+    LARGE_RDS_STORAGE = '100'
+    LARGE_RDS_MAX_STORAGE = '200'
+
+    SITES_LIST = "${JENKINS_HOME}/athena/sites/prod.sites.txt"
+  }
+
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.CREATOR = "${BUILD_USER_ID}"
+              }
+              if(CREATOR == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Checkout') {
+          steps {
+            echo "=> Checkout IaC Repository"
+            script {
+              def scmVars = checkout([
+                $class: 'GitSCM', 
+                branches: [[name: '*/master']],
+                userRemoteConfigs: [[
+                  url: 'git@github.com:eduloginc/devops-iac-athena.git', 
+                  credentialsId: 'eduloginc-git-tankhuu'
+                  ]]
+              ])
+              // Set dynamic s3 prefix
+              env.S3_DEVOPS_PREFIX = "iac/cloudformation/athena/${ENV}/${TENANT}"
+            }
+          }
+        }
+
+        stage('Get Environment Size Variables') {
+          steps {
+            script {
+              switch(ENV_SIZE) {
+                case 'Small':
+                  env.BE_INSTANCE_TYPE = SMALL_BE
+                  env.CQ_INSTANCE_TYPE = SMALL_CQ
+                  env.DB_INSTANCE_TYPE = SMALL_RDS
+                  env.DB_ALLOCATED_STORAGE = SMALL_RDS_STORAGE
+                  env.DB_MAXALLOCATED_STORAGE = SMALL_RDS_MAX_STORAGE
+                  break
+                case 'Medium':
+                  env.BE_INSTANCE_TYPE = MEDIUM_BE
+                  env.CQ_INSTANCE_TYPE = MEDIUM_CQ
+                  env.DB_INSTANCE_TYPE = MEDIUM_RDS
+                  env.DB_ALLOCATED_STORAGE = MEDIUM_RDS_STORAGE
+                  env.DB_MAXALLOCATED_STORAGE = MEDIUM_RDS_MAX_STORAGE
+                  break
+                case 'Large':
+                  env.BE_INSTANCE_TYPE = LARGE_BE
+                  env.CQ_INSTANCE_TYPE = LARGE_CQ
+                  env.DB_INSTANCE_TYPE = LARGE_RDS
+                  env.DB_ALLOCATED_STORAGE = LARGE_RDS_STORAGE
+                  env.DB_MAXALLOCATED_STORAGE = LARGE_RDS_MAX_STORAGE
+                  break
+                default:
+                  env.BE_INSTANCE_TYPE = SMALL_BE
+                  env.CQ_INSTANCE_TYPE = SMALL_CQ
+                  env.DB_INSTANCE_TYPE = SMALL_RDS
+                  env.DB_ALLOCATED_STORAGE = SMALL_RDS_STORAGE
+                  env.DB_MAXALLOCATED_STORAGE = SMALL_RDS_MAX_STORAGE
+                  break
+              }
+            }
+          }
+        }
+
+        stage('Package Templates') {
+          steps {
+            echo "=> Package CFN Templates"
+            sh """
+              #!/bin/bash -xe
+              $AWS_CMD --region ${params.REGION} cloudformation package --template-file ${MASTER_TEMPLATE} \
+              --s3-bucket ${S3_DEVOPS} --s3-prefix ${S3_DEVOPS_PREFIX} \
+              --force-upload --output-template-file ${OUTPUT_MASTER_TEMPLATE}
+            """
+            echo "=> Upload master template to S3"
+            sh """
+              #!/bin/bash -xe
+              $AWS_CMD s3 cp ${OUTPUT_MASTER_TEMPLATE} s3://${S3_DEVOPS}/${S3_DEVOPS_PREFIX}/${OUTPUT_MASTER_TEMPLATE}
+            """
+          }
+        }
+
+        stage('Create CFN Stacks') {
+          environment {
+            BE_AMI_ID = sh(script: '/usr/local/bin/get-ami-from-tag ${BE_RELEASE_VERSION} ${REGION} ${ENV}', returnStdout: true).trim()
+            TEMPLATE_URL = "https://${S3_DEVOPS}.s3.us-east-2.amazonaws.com/${S3_DEVOPS_PREFIX}/${OUTPUT_MASTER_TEMPLATE}"
+          }
+          steps {
+            // Create CFN Master Stack
+            echo "=> Deploy CFN Template with ${BE_AMI_ID}"
+            sh """
+              #!/bin/bash -xe
+              $AWS_CMD --region ${params.REGION} cloudformation deploy --template-file ${OUTPUT_MASTER_TEMPLATE} \
+              --s3-bucket ${S3_DEVOPS} --s3-prefix ${S3_DEVOPS_PREFIX} \
+              --stack-name ${STACK_NAME} \
+              --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
+              --force-upload \
+              --tags \
+                environment=${ENV} \
+                project=${PROJECT} \
+                author=${AUTHOR} \
+                tenant=${TENANT} \
+                creator=${CREATOR} \
+                infras=${INFRAS_VERSION} \
+              --parameter-overrides \
+                KeyPairName=${KEYPAIR} \
+                Tenant=${params.TENANT} \
+                TenantId=${TENANT_ID} \
+                Env=${ENV} \
+                VPCStackName=${VPC_STACK_NAME} \
+                BackendAMIId=${BE_AMI_ID}  \
+                FEDomain=${DOMAIN}  \
+                FEHostedZoneId=${HOSTEDZONE_ID} \
+                FESSLCertificateId=${SSL_CERTIFICATE_ARN} \
+                BEDomain=${BE_DOMAIN}  \
+                BEHostedZoneId=${BE_HOSTEDZONE_ID} \
+                BESSLCertificateId=${BE_SSL_CERTIFICATE_ARN} \
+                BackendInstanceType=${BE_INSTANCE_TYPE}  \
+                CQAMIID=${CQ_AMI_ID}  \
+                CQInstanceType=${CQ_INSTANCE_TYPE}  \
+                DBInstanceClass=${DB_INSTANCE_TYPE}  \
+                DBAllocatedStorage=${DB_ALLOCATED_STORAGE}  \
+                DBMaxAllocatedStorage=${DB_MAXALLOCATED_STORAGE}  \
+                DBMasterUserPassword=${params.DB_MASTER_PASSWORD} \
+                DBSnapshotIdentifier=${params.DB_SNAPSHOT_ID} \
+                KarrosGateway=${KARROS_GATEWAY} \
+                KeycloakDomain=${KEYCLOAK_DOMAIN} \
+                KeycloakId=${KEYCLOAK_ID} \
+                KeycloakSecret=${KEYCLOAK_SECRET} \
+                KafkaBrokers=${KAFKA_BROKERS} \
+                ZookeeperBrokers=${ZOOKEEPER_BROKERS} \
+                DebeziumControllerAPI=${DEBEZIUM_CONTROLLER_API} \
+                DebeziumControllerKey=${DEBEZIUM_CONTROLLER_KEY} 
+            """
+          }
+        }
+
+        stage('Wait for CFN Stacks Creation COMPLETE') {
+          steps {
+            echo "=> Wait for Master Stack Name: ${STACK_NAME} COMPLETE"
+            script {
+              try {
+                sh """
+                  #!/bin/bash -xe
+                  $AWS_CMD --region ${REGION} cloudformation wait stack-create-complete --stack-name ${STACK_NAME}
+                """
+              }
+              catch (err) {
+                  echo "Caught: ${err}"
+                  throw new Exception("Wait for Stack Creation Failure!")
+              }
+            }
+          }
+        }
+
+        stage('Deploy Frontend') {
+          environment {
+            FE_DOMAIN = "${params.TENANT}.${DOMAIN}"
+          }
+          steps {
+            echo "=> Download package ${params.FE_RELEASE_VERSION}"
+            sh 'aws s3 cp s3://${S3_ARTIFACTS}/${S3_ARTIFACTS_PREFIX}/${FE_RELEASE_VERSION}.tar.gz .'
+            sh 'tar zxvf ${FE_RELEASE_VERSION}.tar.gz'
+
+            echo "==> Configure Environment"
+            configurePackage("${TENANT}", "${FE_RELEASE_VERSION}", "${ENV}")
+
+            echo "==> Deploy Athena Frontend for ${params.TENANT}"
+            deployToTenant("${ENV}", "${FE_DOMAIN}")
+          }
+        }
+
+        stage('Deploy WebQuery') {
+          environment {
+            WQ_DOMAIN = "webquery-${params.TENANT}.${DOMAIN}"
+          }
+          steps {
+            echo "=> Download package ${params.FE_RELEASE_VERSION}"
+            sh 'aws s3 cp s3://${S3_ARTIFACTS}/${S3_ARTIFACTS_PREFIX_WQ}/${WQ_RELEASE_VERSION}.tar.gz .'
+            sh 'tar zxvf ${WQ_RELEASE_VERSION}.tar.gz'
+
+            echo "==> Configure Environment"
+            configureWQPackage("${TENANT}", "${WQ_RELEASE_VERSION}", "${ENV}")
+
+            echo "==> Deploy Athena Frontend for ${params.TENANT}"
+            deployWQToTenant("${ENV}", "${WQ_DOMAIN}")
+          }
+        }
+        
+        stage('Add site information to SSM Parameter Store') {
+          steps {
+            echo "=> Add Site Information into SSM Parameter Store"
+            dir('cloudformation/athena/scripts/cfn') {
+              script {
+                sh '''#!/bin/bash -xe
+                  fe_url=$(/usr/local/bin/get_output_from_stack ${STACK_NAME} FrontendURL ${REGION} ${ENV})
+                  fe_cf_id=$(/usr/local/bin/get_output_from_stack ${STACK_NAME} FECloudFrontId ${REGION} ${ENV})
+                  wq_url=$(/usr/local/bin/get_output_from_stack ${STACK_NAME} WebQueryURL ${REGION} ${ENV})
+                  wq_cf_id=$(/usr/local/bin/get_output_from_stack ${STACK_NAME} WQCloudFrontId ${REGION} ${ENV})
+                  be_url=$(/usr/local/bin/get_output_from_stack ${STACK_NAME} BackendURL ${REGION} ${ENV})
+                  rds_endpoint=$(/usr/local/bin/get_output_from_stack ${STACK_NAME} RDSEndpoint ${REGION} ${ENV})
+                  be_asg=$(/usr/local/bin/get_output_from_stack ${STACK_NAME} BEASGName ${REGION} ${ENV})
+                  cq_asg=$(/usr/local/bin/get_output_from_stack ${STACK_NAME} CQASGName ${REGION} ${ENV})
+                  sh add_environment_params.sh ${ENV} ${TENANT} ${STACK_NAME} ${fe_url} ${fe_cf_id} ${wq_url} ${wq_cf_id} ${be_url} ${rds_endpoint} ${be_asg} ${cq_asg} ${DB_MASTER_PASSWORD}
+                '''
+              }
+            }
+            echo "=> Add Site into Sites List"
+            sh "echo ${TENANT} >> ${SITES_LIST}"
+          }
+          post {
+            success {
+              echo "Deploy success for ${ENV} - Tenant: ${params.TENANT}"
+              notifyGChat("${TENANT}", "${ENV}", "$FE_RELEASE_VERSION", "$BE_RELEASE_VERSION", "$WQ_RELEASE_VERSION", "$INFRAS_VERSION", "$GCHAT_TOKEN_DEVOPS", "$CREATOR")
+            }
+            failure {
+              echo "Deploy failed for ${ENV} - Tenant: ${params.TENANT}"
+              notifyGChat("${TENANT}", "${ENV}", "$FE_RELEASE_VERSION", "$BE_RELEASE_VERSION", "$WQ_RELEASE_VERSION", "$INFRAS_VERSION", "$GCHAT_TOKEN_DEVOPS", "$CREATOR")
+            }
+          }
+        }
+
+        stage('homer assistant') {
+          steps {
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              echo "Homer collect information"
+              script {
+                def createDate = sh(script: "echo `date`", returnStdout: true).trim()
+                env.filePath = "/tmp/sites/site-${ENV}-${TENANT}.json"
+                def document = [
+                  "region": "ohio",
+                  "site": "$TENANT",
+                  "envType": "${ENV}",
+                  "cfnStack": "$STACK_NAME",
+                  "tenantId": "$TENANT_ID",
+                  "size": "$ENV_SIZE",
+                  "feVersion": "$FE_RELEASE_VERSION",
+                  "wqVersion": "$WQ_RELEASE_VERSION",
+                  "beVersion": "$BE_RELEASE_VERSION",
+                  "infrasVersion": "$INFRAS_VERSION",
+                  "feUrl": "https://${params.TENANT}.${DOMAIN}",
+                  "wqUrl": "https://webquery-${params.TENANT}.${DOMAIN}",
+                  "beUrl": "https://ath-be-${params.TENANT}.${DOMAIN}",
+                  "rdsEndpoint": "athena-${TENANT}-rds.ctspwoqaxc3p.us-east-2.rds.amazonaws.com",
+                  "creator": "${CREATOR}",
+                  "createTime": "${createDate}",
+                  "status": "active"
+                ]
+                writeJSON file: "$filePath", json: document
+              }
+              sh '''
+                #!/bin/bash -xe
+                cd ~/athena/devops-automation-helper/friday/esShipper/
+                /usr/bin/python3 -m index --filePath=${filePath}
+              '''
+            }
+          }
+        }
+      } 
+    }
+  }   
+
+  post {
+    always {
+      echo '==> Clean up built after run'
+      cleanWs()
+    }
+    success {
+      echo "Deploy success for ${ENV} - Tenant: ${params.TENANT}"
+    }
+    failure {
+      echo "Deploy failed for ${ENV} - Tenant: ${params.TENANT}"
+    }
+  }
+}

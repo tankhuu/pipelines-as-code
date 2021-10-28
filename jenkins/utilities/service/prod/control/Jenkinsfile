@@ -1,0 +1,96 @@
+node {
+    beServicesList = sh (script: 'cat ${JENKINS_HOME}/athena/service_list.txt', returnStdout: true).trim()
+    sitesList = sh (script: 'cat ${JENKINS_HOME}/athena/sites/prod.sites.txt', returnStdout: true).trim()
+}
+
+pipeline{
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'siteName', choices: "${sitesList}", description: 'Site to control BE service')
+    choice(name: 'service', choices: "${beServicesList}", description: 'List of Athena Backend Services.')
+    choice(name: 'action', choices: ['restart', 'stop', 'status'])
+  }
+
+  environment {
+    envType = 'prod'
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.CREATOR = "${BUILD_USER_ID}"
+              }
+              if(CREATOR == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Get AWS_CMD for env_type') {
+          steps {
+            script {
+              env.AWS_CMD = 'aws'
+              if(envType == 'prod') {
+                env.AWS_CMD = 'aws --profile prod'
+              } else {
+                env.AWS_CMD = 'aws'
+              }
+
+              // Get BE_ASG_NAME from AWS Parameter Store
+              env.BE_ASG_NAME = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${envType}/${siteName}/be_asg --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+            }
+          }
+        }
+        stage('Control service prod env') {
+          environment {
+            ip_addresses = sh(script: '/usr/local/bin/getip_fromasg get_private_ip --profile ${envType} --name=${BE_ASG_NAME}', returnStdout: true).trim()
+            ssh_profile = "${JENKINS_HOME}/.ssh/devops.pem"
+            ssh_user = 'ubuntu'
+          }
+          steps {
+            script {
+              ip_addresses.tokenize(',[]').each { ip ->
+                ip = ip.trim()
+                if(service == 'all-services') {
+                  sh "ssh -i ${ssh_profile} ${ssh_user}@${ip} -t 'sudo systemctl ${action} gateway;sudo systemctl ${action} middle;sudo systemctl ${action} backend;sudo systemctl ${action} command-distributor;sudo systemctl ${action} geocodeservice;sudo systemctl ${action} importservice;sudo systemctl ${action} overlay;sudo systemctl ${action} plannedrollover;sudo systemctl ${action} reportsserver;sudo systemctl ${action} command-distributor;sudo systemctl ${action} geocalculation;sudo systemctl ${action} ivin;sudo systemctl ${action} timeattendance;sudo systemctl ${action} aggregateservice;sudo systemctl ${action} rres'"
+                } else {
+                  sh "ssh -i ${ssh_profile} ${ssh_user}@${ip} -t 'sudo systemctl ${action} ${service}'"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  post {
+    always {
+      echo "=> Clean Workspace after run"
+      // cleanWs()
+    }
+    success {
+      echo "==> Build Success"
+    }
+    failure {
+      echo "==> Build Failure"
+    }
+  }
+}

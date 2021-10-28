@@ -1,0 +1,161 @@
+// Notify to channel
+def notifyGChat(env_name, version, executor, channel) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "Status: *${currentBuild.result}*\nType: WebQuery\nEnvType: Prod\nEnvironmentName: ${env_name}\n*ReleaseVersion*: ${version}\nDuration: ${DURATION}\nExecutor: ${executor}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack(env_name, version, executor, channel) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *Athena UI*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Status: *${currentBuild.result}*\nType: WebQuery\nEnvType: Prod\nEnvironmentName: ${env_name}\n*ReleaseVersion*: ${version}\nDuration: ${DURATION}\nExecutor: ${executor}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+
+def configurePackage(siteName, version, envType) {
+  def configFileName = 'config'
+  dir('dist/web-query/assets') {
+    sh "cp ${configFileName}.json /tmp/${configFileName}.${siteName}.json"
+    sh "update-fe-webquery-config ${configFileName} ${version} ${siteName} ${envType}"
+    sh "cp /tmp/${configFileName}.${siteName}.json ${configFileName}.json"
+  }
+}
+
+// Function deploy Frontend to Tenant
+def deployToSite(command, domain, cloudfrontId) {
+  dir('dist/web-query') {
+    echo "=> Remove files on s3://${domain}"
+    sh "${command} s3 rm s3://${domain} --recursive > /dev/null"
+    echo "=> Upload files to s3://${domain}"
+    sh "${command} s3 cp --acl public-read --recursive . s3://${domain}/ > /dev/null"
+    echo "=> Invalidate Cloudfront ${cloudfrontId}"
+    sh "${command} cloudfront create-invalidation --distribution-id ${cloudfrontId} --paths \"/*\""
+  }
+}
+
+node {
+    wqReleasesList = sh (script: 'cat ${JENKINS_HOME}/athena/versions/release_webquery.txt', returnStdout: true).trim()
+    sitesList = sh (script: 'cat ${JENKINS_HOME}/athena/sites/nonprod.sites.txt', returnStdout: true).trim()
+}
+
+pipeline {
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'siteName', choices: "${sitesList}", description: 'SiteName to deploy') 
+    choice(name: 'version', choices: "${wqReleasesList}", description: 'WebQuery Release Version tagged by QA/QC. E.g. 1.1.1')
+  }
+
+  environment {
+    envType = 'nonprod'
+    WQ_DOMAIN = 'athena-nonprod.com'
+
+    GCHAT_TOKEN = "${GCHAT_TOKEN_ATH_RELEASE}"
+    SLACK_CHANNEL = "${SLACK_ATH_RELEASE}"
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.executor = "${BUILD_USER_ID}"
+              }
+              if(executor == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Get Info for envType') {
+          steps {
+            script {
+              env.AWS_CMD = 'aws'
+              if(envType == 'prod') {
+                env.AWS_CMD = 'aws --profile prod'
+              } else {
+                env.AWS_CMD = 'aws'
+              }
+            }
+          }
+        }
+        stage('Pull package') {
+          steps {
+            echo "=> Download artifact from Athena AWS Account"
+            sh 'aws s3 cp s3://${ATH_S3_ARTIFACTS_BUCKET}/frontend/webquery/release/${version}.tar.gz . > /dev/null'
+            sh 'tar zxvf ${version}.tar.gz > /dev/null'
+          }
+        }
+        stage("Deploy to Site") {
+          environment {
+            CF_ID = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${envType}/${siteName}/wq_cf_id --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+          }
+          steps {
+            echo "=> Configure Environment"
+            configurePackage("${siteName}", "${version}", "${envType}")
+
+            echo "=> Deploy to Site"
+            deployToSite("${AWS_CMD}", "webquery-${siteName}.${WQ_DOMAIN}", "${CF_ID}")
+          }
+          post {
+            success {
+              echo "Deploy success for ${siteName}"
+              notifyGChat("${siteName}", "${version}", "${executor}", "${GCHAT_TOKEN}")
+              notifySlack("${siteName}", "${version}", "${executor}", "${SLACK_CHANNEL}")
+            }
+            failure {
+              echo "Deploy failed for ${siteName}"
+              notifyGChat("${siteName}", "${version}", "${executor}", "${GCHAT_TOKEN}")
+              notifySlack("${siteName}", "${version}", "${executor}", "${SLACK_CHANNEL}")
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo '==> Clean up built after run'
+      // cleanWs()
+    }
+    success {
+      echo "Job run success"
+    }
+    failure {
+      echo "Job run failed"
+    }
+  }
+}

@@ -1,0 +1,444 @@
+// Notify to channel
+def notifyGChat(buildTag, releaseTag, channel, creator) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "Status: ${currentBuild.result}\nType: Backend\nStage: Tag Release\nFrom BuildTag: ${buildTag}\nReleaseTag: ${releaseTag}\nDuration: ${DURATION}\nCreator: ${creator}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack(buildTag, releaseTag, channel, creator) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *Backend Release Tag*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Status: *${currentBuild.result}*\nType: Backend\nStage: Tag Release\nFrom BuildTag: ${buildTag}\n*ReleaseTag: ${releaseTag}*\nDuration: ${DURATION}\nCreator: ${creator}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+
+def tagECR(repo, buildTag, releaseTag) {
+  sh '''
+    #!/bin/bash -xe
+    MANIFEST=$(aws ecr batch-get-image --repository-name ${repo} --image-ids imageTag=${buildTag} --query 'images[].imageManifest' --output text)
+    aws ecr put-image --repository-name ${repo} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+  '''
+}
+
+node {
+  gatewayBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/gateway.txt", returnStdout: true).trim()
+  tnxhubBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/tnxhub.txt", returnStdout: true).trim()
+  routingBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/routing.txt", returnStdout: true).trim()
+  routingmigrationBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/routingmigration.txt", returnStdout: true).trim()
+  geocodeBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/geocodeservice.txt", returnStdout: true).trim()
+  importBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/importservice.txt", returnStdout: true).trim()
+  overlayBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/overlay.txt", returnStdout: true).trim()
+  plannedrolloverBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/plannedrollover.txt", returnStdout: true).trim()
+  reportsserverBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/reportsserver.txt", returnStdout: true).trim()
+  commandDistributorBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/command-distributor.txt", returnStdout: true).trim()
+  geocalculationBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/geocalculation.txt", returnStdout: true).trim()
+  ivinBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/ivin.txt", returnStdout: true).trim()
+  timeattendanceBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/timeattendance.txt", returnStdout: true).trim()
+  aggregateserviceBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/aggregateservice.txt", returnStdout: true).trim()
+  rresBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/rres.txt", returnStdout: true).trim()
+  specialneedsBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/specialneeds.txt", returnStdout: true).trim()
+  configserverBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/configserver.txt", returnStdout: true).trim()
+  geoserverBuildTags = sh (script: "cat $JENKINS_HOME/athena/services/buildTags/geoserver.txt", returnStdout: true).trim()
+}
+
+pipeline {
+  agent any
+  
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    string(name: 'releaseTag', description: "The Release Tag that QC/QA wants to add into Image. Notes: Tag shouldn't have space. Ex: 1.29.0 ")
+    choice(name: 'gateway', choices: "$gatewayBuildTags", description: 'Gateway Build Tag. Eg: master-9edf379')
+    choice(name: 'tnxhubservice', choices: "$tnxhubBuildTags", description: 'TransactionHub Build Tag. Eg: master-9edf379')
+    choice(name: 'routingservice', choices: "$routingBuildTags", description: 'RoutingServer Build Tag. Eg: master-9edf379')
+    choice(name: 'routingmigration', choices: "$routingmigrationBuildTags", description: 'RoutingMigration Build Tag. Eg: master-9edf379')
+    choice(name: 'geocodeservice', choices: "$geocodeBuildTags", description: 'GeoCodeService Build Tag. Eg: master-9edf379')
+    choice(name: 'importservice', choices: "$importBuildTags", description: 'ImportService Build Tag. Eg: master-9edf379')
+    choice(name: 'overlay', choices: "$overlayBuildTags", description: 'Overlay Build Tag. Eg: master-9edf379')
+    choice(name: 'plannedrolloverservice', choices: "$plannedrolloverBuildTags", description: 'PlannedRollover Build Tag. Eg: master-9edf379')
+    choice(name: 'reportservice', choices: "$reportsserverBuildTags", description: 'ReportsServer Build Tag. Eg: master-9edf379')
+    choice(name: 'commandDistributor', choices: "$commandDistributorBuildTags", description: 'CommandDistributor Build Tag. Eg: master-9edf379')
+    choice(name: 'geocalculation', choices: "$geocalculationBuildTags", description: 'GeoCalculation Build Tag. Eg: master-9edf379')
+    choice(name: 'ivin', choices: "$ivinBuildTags", description: 'IVIN Build Tag. Eg: master-9edf379')
+    choice(name: 'timeattendance', choices: "$timeattendanceBuildTags", description: 'EDTA Build Tag. Eg: master-9edf379')
+    choice(name: 'aggregateservice', choices: "$aggregateserviceBuildTags", description: 'AggregateService Build Tag. Eg: master-9edf379')
+    choice(name: 'rres', choices: "$rresBuildTags", description: 'RideRegistrationETL Build Tag. Eg: master-9edf379')
+    choice(name: 'specialneeds', choices: "$specialneedsBuildTags", description: 'SpecialNeeds Build Tag. Eg: master-9edf379')
+    choice(name: 'configserver', choices: "$configserverBuildTags", description: 'ConfigServer Build Tag. Eg: master-9edf379')
+    choice(name: 'geoserver', choices: "$geoserverBuildTags", description: 'GeoServer Build Tag. Eg: master-9edf379')
+  }
+
+  environment {
+    REPO_PREFIX = 'athena'
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.CREATOR = "$BUILD_USER_ID"
+              }
+              echo "Creator: $CREATOR"
+              if(CREATOR == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Tag Gateway') {
+          when {
+            not { equals expected: 'none', actual: gateway }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/gateway"
+            BUILD_TAG = "$gateway"
+            SERVICE = 'gateway'
+          }
+          steps {
+            sh '''
+              #!/bin/bash -xe
+              MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+              aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+              echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+            '''
+          }
+        }
+        stage('Tag tnxhubservice') {
+          when {
+            not { equals expected: 'none', actual: tnxhubservice }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/tnxhubservice"
+            BUILD_TAG = "$tnxhubservice"
+            SERVICE = 'tnxhub'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Tag routingservice') {
+          when {
+            not { equals expected: 'none', actual: routingservice }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/routingservice"
+            BUILD_TAG = "$routingservice"
+            SERVICE = 'routing'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Tag geocodeservice') {
+          when {
+            not { equals expected: 'none', actual: geocodeservice }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/geocodeservice"
+            BUILD_TAG = "$geocodeservice"
+            SERVICE = 'geocodeservice'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Tag importservice') {
+          when {
+            not { equals expected: 'none', actual: importservice }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/importservice"
+            BUILD_TAG = "$importservice"
+            SERVICE = 'importservice'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Tag overlay') {
+          when {
+            not { equals expected: 'none', actual: overlay }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/overlay"
+            BUILD_TAG = "$overlay"
+            SERVICE = 'overlay'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Tag plannedrolloverservice') {
+          when {
+            not { equals expected: 'none', actual: plannedrolloverservice }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/plannedrolloverservice"
+            BUILD_TAG = "$plannedrolloverservice"
+            SERVICE = 'plannedrollover'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Tag reportservice') {
+          when {
+            not { equals expected: 'none', actual: reportservice }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/reportservice"
+            BUILD_TAG = "$reportservice"
+            SERVICE = 'reportsserver'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Tag command-distributor') {
+          when {
+            not { equals expected: 'none', actual: commandDistributor }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/command-distributor"
+            BUILD_TAG = "$commandDistributor"
+            SERVICE = 'command-distributor'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Tag geocalculation') {
+          when {
+            not { equals expected: 'none', actual: geocalculation }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/geocalculation"
+            BUILD_TAG = "$geocalculation"
+            SERVICE = 'geocalculation'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Tag ivin') {
+          when {
+            not { equals expected: 'none', actual: ivin }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/ivin"
+            BUILD_TAG = "$ivin"
+            SERVICE = 'ivin'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Tag timeattendance') {
+          when {
+            not { equals expected: 'none', actual: timeattendance }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/timeattendance"
+            BUILD_TAG = "$timeattendance"
+            SERVICE = 'timeattendance'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Tag aggregateservice') {
+          when {
+            not { equals expected: 'none', actual: aggregateservice }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/aggregateservice"
+            BUILD_TAG = "$aggregateservice"
+            SERVICE = 'aggregateservice'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Tag rres') {
+          when {
+            not { equals expected: 'none', actual: rres }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/rres"
+            BUILD_TAG = "$rres"
+            SERVICE = 'rres'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Tag specialneeds') {
+          when {
+            not { equals expected: 'none', actual: specialneeds }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/specialneeds"
+            BUILD_TAG = "$specialneeds"
+            SERVICE = 'specialneeds'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Tag routingmigration') {
+          when {
+            not { equals expected: 'none', actual: routingmigration }
+          }
+          environment {
+            REPO = "$REPO_PREFIX/routingmigration"
+            BUILD_TAG = "$routingmigration"
+            SERVICE = 'routingmigration'
+          }
+          steps {
+            sh '''
+                #!/bin/bash -xe
+                MANIFEST=$(aws ecr batch-get-image --repository-name ${REPO} --image-ids imageTag=${BUILD_TAG} --query 'images[].imageManifest' --output text)
+                aws ecr put-image --repository-name ${REPO} --image-tag ${releaseTag} --image-manifest "${MANIFEST}"
+                echo ${SERVICE} >> ${JENKINS_HOME}/athena/services/releaseTags/${releaseTag}.txt
+                echo ${releaseTag} >> ${JENKINS_HOME}/athena/services/releaseTags/${SERVICE}.txt
+              '''
+          }
+        }
+        stage('Add Release Tag into List') {
+          steps {
+            sh "echo $releaseTag >> ${JENKINS_HOME}/athena/services/releaseTags/releases.txt"
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo '==> Clean up built after run'
+      cleanWs()
+    }
+    success {
+      echo 'Job run success'
+    }
+    failure {
+      echo 'Job run failed'
+    }
+  }
+}

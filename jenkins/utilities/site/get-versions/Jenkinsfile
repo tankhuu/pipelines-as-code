@@ -1,0 +1,57 @@
+pipeline {
+  agent any
+  
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'envType', choices: ['nonprod', 'prod'], description: 'Environment Type of Site.')
+    string(name: 'siteName', description: 'SiteName that you want to get Versions.')
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+
+      // environment {}
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Get Versions of Site') {
+          steps {
+            dir('scripts/python') {
+              script {
+                env.currentFeVersion = sh(script: "python3 getFeVersion.py --envType=${envType} --siteName=${siteName}", returnStdout: true).trim()
+                env.currentBeVersion = sh(script: "python3 getBeVersion.py --envType=${envType} --siteName=${siteName}", returnStdout: true).trim()
+                env.currentDbVersion = sh(script: "python3 getDbVersion.py --envType=${envType} --siteName=${siteName}", returnStdout: true).trim()
+              }
+              echo "Frontend Version: $currentFeVersion"
+              echo "Backend Version: $currentBeVersion"
+              echo "Database Version: $currentDbVersion"
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo '==> Clean up built after run'
+      cleanWs()
+      
+    }
+    success {
+      echo 'Job run success'
+    }
+    failure {
+      echo 'Job run failed'
+    }
+  }
+}

@@ -1,0 +1,91 @@
+node {
+  sitesList = sh (script: 'cat ${JENKINS_HOME}/athena/sites/prod.sites.txt', returnStdout: true).trim()
+}
+
+pipeline{
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'siteName', choices: "${sitesList}", description: 'SiteName to take DB snapshot from.')
+    string(name: 'email', description: 'Email Address of user. No space accepted!!!')
+    string(name: 'firstname', description: 'First Name of user. No space accepted!!!')
+    string(name: 'lastname', description: 'Last Name of user. No space accepted!!!')
+  }
+
+  environment {
+    envType = 'prod'
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.CREATOR = "${BUILD_USER_ID}"
+              }
+              if(CREATOR == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Get AWS_CMD for env_type') {
+          steps {
+            script {
+              env.AWS_CMD = 'aws'
+              if(envType == 'prod') {
+                env.AWS_CMD = 'aws --profile prod'
+              } else {
+                env.AWS_CMD = 'aws'
+              }
+            }
+          }
+        }
+        stage('Create new user in database') {
+          environment {
+            RDS_EP = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${envType}/${siteName}/rds_endpoint --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+            DB_PASS = sh(script: "${AWS_CMD} ssm get-parameter --with-decryption --name /edulog/athena/${envType}/${siteName}/db_pass --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+          }
+          steps {
+            dir('scripts/bash') {
+              echo "=> Create new user sql script"
+              sh "cp -p ../sql/create-user.sql create-user.new.sql"
+              sh 'sed -i "s/FirstName/$firstname/g" create-user.new.sql'
+              sh 'sed -i "s/LastName/$lastname/g" create-user.new.sql'
+              sh 'sed -i "s/EmailAddress/$email/g" create-user.new.sql'
+              sh 'cat create-user.new.sql'
+              sh "/bin/sh create-user.sh ${RDS_EP} ${DB_PASS}"
+            }
+          }
+        }
+      }
+    }
+  }
+  post {
+    always {
+      echo "=> Clean Workspace after run"
+      cleanWs()
+    }
+    success {
+      echo "==> Build Success"
+    }
+    failure {
+      echo "==> Build Failure"
+    }
+  }
+}

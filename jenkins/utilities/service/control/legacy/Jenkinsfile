@@ -1,0 +1,102 @@
+node {
+    beServicesList = sh (script: 'cat ${JENKINS_HOME}/athena/service_list.txt', returnStdout: true).trim()
+}
+
+pipeline{
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'env_type', choices: ['nonprod', 'prod'], description: 'Type of Environment to take snapshot. Currently supports for nonprod only.')
+    choice(name: 'environment', 
+      choices: ['devleg', 'stageleg', 'demoleg', 'manitouspring-co', 'south-lane-or', 'midlandpublicschools', 'puydedome'], 
+      description: 'Environment to take DB snapshot from. Default is dev')
+    choice(name: 'service', choices: "${beServicesList}", description: 'List of Athena Backend Services.')
+    choice(name: 'action', choices: ['restart', 'stop', 'status'])
+  }
+
+  environment {
+    S3_BUCKET_NAME = 'edulog-athena-backup'
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Get AWS_CMD for env_type') {
+          steps {
+            script {
+              env.REGION = 'us-east-2'
+              env.AWS_CMD = 'aws'
+              if(env_type == 'prod') {
+                env.AWS_CMD = 'aws --profile prod'
+              } else {
+                env.AWS_CMD = 'aws'
+              }
+
+              // temporary support for region Paris
+              if(environment == 'puydedome') {
+                env.REGION = "eu-west-3"
+              }
+
+              // Get BE_ASG_NAME from AWS Parameter Store
+              env.BE_ASG_NAME = sh(script: "${AWS_CMD} --region ${REGION} ssm get-parameter --name /edulog/athena/${env_type}/${environment}/be_asg --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+            }
+          }
+        }
+        stage('Control service prod env') {
+          when { equals expected: 'prod', actual: params.env_type }
+          environment {
+            ip_addresses = sh(script: '/usr/local/bin/getip_fromasg get_private_ip --profile ${env_type} --region ${REGION} --name=${BE_ASG_NAME}', returnStdout: true).trim()
+            ssh_profile = "${JENKINS_HOME}/.ssh/devops.pem"
+            ssh_user = 'ubuntu'
+          }
+          steps {
+            script {
+              ip_addresses.tokenize(',[]').each { ip ->
+                sh "ssh -i ${ssh_profile} ${ssh_user}@${ip} -t 'sudo systemctl ${action} ${service}'"
+              }
+            }
+          }
+        }
+        stage('Control service nonprod env') {
+          when { not { equals expected: 'prod', actual: params.env_type } }
+          environment {
+            ip_addresses = sh(script: '/usr/local/bin/getip_fromasg get_private_ip --region ${REGION} --name=${BE_ASG_NAME}', returnStdout: true).trim()
+            ssh_profile = "${JENKINS_HOME}/.ssh/devops.pem"
+            ssh_user = 'ubuntu'
+          }
+          steps {
+            script {
+              ip_addresses.tokenize(',[]').each { ip ->
+                sh "ssh -i ${ssh_profile} ${ssh_user}@${ip} -t 'sudo systemctl ${action} ${service}'"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  post {
+    always {
+      echo "=> Clean Workspace after run"
+      // cleanWs()
+    }
+    success {
+      echo "==> Build Success"
+    }
+    failure {
+      echo "==> Build Failure"
+    }
+  }
+}

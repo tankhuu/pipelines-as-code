@@ -1,0 +1,122 @@
+pipeline {
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'envType', choices: ['nonprod', 'prod'], description: 'Environment Type for creating Debezium Connectors. Default is NonProd.')
+    string(name: 'siteName', description: 'Name of Athena Site. Eg: develop | release | vb | ...')
+  }
+
+  environment {
+    MODEL_NAMES = 'trip-master,route,run,school,student,transport-request'
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.CREATOR = "${BUILD_USER_ID}"
+              }
+              if(CREATOR == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Checkout') {
+          steps {
+            echo "=> Checkout Debezium Configs Repository"
+            script {
+              def scmVars = checkout([
+                $class: 'GitSCM', 
+                branches: [[name: '*/master']],
+                userRemoteConfigs: [[
+                  url: 'git@github.com:eduloginc/debezium-connector-configs.git', 
+                  credentialsId: 'eduloginc-git-tankhuu'
+                  ]]
+              ])
+            }
+          }
+        }
+        stage('Get Debezium Cluster') {
+          steps {
+            script {
+              env.DEBEZIUM_CLUSTER_ENDPOINT = 'http://debezium.athena-nonprod.com/connectors'
+              if(envType == 'prod') {
+                env.DEBEZIUM_CLUSTER_ENDPOINT = 'https://debezium.karrostech.net/connectors'
+              } else {
+                env.DEBEZIUM_CLUSTER_ENDPOINT = 'http://debezium.athena-nonprod.com/connectors'
+              }
+            }
+          }
+        }
+        stage('Generate Configs for Debezium Connectors') {
+          environment {
+            CONFIG_DIR = "${envType}/${siteName}"
+          }
+          steps {
+            echo "=> Clone configs template for new site"
+            sh "mkdir -p ${CONFIG_DIR} && cp -rp template/* ${CONFIG_DIR}/"
+
+            echo "=> Update siteName for configs"
+            dir("${CONFIG_DIR}") {
+              script {
+                MODEL_NAMES.tokenize(',').each { modelName ->
+                  def connector_config_file = "athena-${modelName}-connector.json"
+                  echo "=> Update for ${connector_config_file}"
+                  sh """
+                    #!/bin/bash
+                    sed -i "s/SITE_NAME/${siteName}/g" ${connector_config_file}
+                  """
+                  // update RDS Endpoint for prod env
+                  if(envType == 'prod') {
+                    sh """
+                      #!/bin/bash
+                      sed -i "s/cr5mzwdlkiuv/ctspwoqaxc3p/g" ${connector_config_file}
+                    """
+                  }
+
+                  echo "=> Create Debezium Connector for ${modelName}"
+                  sh "curl -s -X POST -H 'Content-Type: application/json' ${DEBEZIUM_CLUSTER_ENDPOINT} --data @${connector_config_file}"
+                }
+              }
+            }
+            // echo "=> Commit new Config to GitHub"
+            // sh "git add ."
+            // sh "git commit -m 'new site ${CONFIG_DIR}'"
+            // sh "git push"
+          }
+        }
+      }
+    }
+  }
+  
+
+  post {
+    always {
+      echo "=> Cleanup"
+      cleanWs()
+    }
+    success {
+      echo "=> Job run success"
+    }
+    failure {
+      echo "=> Job run failed"
+    }
+  }
+}

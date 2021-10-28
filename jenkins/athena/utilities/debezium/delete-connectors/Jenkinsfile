@@ -1,0 +1,67 @@
+pipeline {
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'envType', choices: ['nonprod', 'prod'], description: 'Environment Type for creating Debezium Connectors. Default is NonProd.')
+    string(name: 'siteName', description: 'Name of Athena Site. Eg: develop | release | vb | ...')
+  }
+
+  environment {
+    MODEL_NAMES = 'trip-master,route,run,school,student,transport-request'
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Get Debezium Cluster') {
+          steps {
+            script {
+              env.DEBEZIUM_CLUSTER_ENDPOINT = 'http://debezium.athena-nonprod.com/connectors'
+              if(envType == 'prod') {
+                env.DEBEZIUM_CLUSTER_ENDPOINT = 'https://debezium.karrostech.net/connectors'
+              } else {
+                env.DEBEZIUM_CLUSTER_ENDPOINT = 'http://debezium.athena-nonprod.com/connectors'
+              }
+            }
+          }
+        }
+        stage('Delete Debezium Connectors for Site ${site_name}') {
+          steps {
+            script {
+              MODEL_NAMES.tokenize(',').each { modelName ->
+                echo "=> Delete Debezium Connector for ${modelName}"
+                sh "curl -s -X DELETE ${DEBEZIUM_CLUSTER_ENDPOINT}/athena-${siteName}-${modelName}-connector"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  
+
+  post {
+    always {
+      echo "=> Cleanup"
+      cleanWs()
+    }
+    success {
+      echo "=> Job run success"
+    }
+    failure {
+      echo "=> Job run failed"
+    }
+  }
+}

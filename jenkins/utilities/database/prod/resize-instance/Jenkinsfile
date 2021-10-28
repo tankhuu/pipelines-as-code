@@ -1,0 +1,87 @@
+node {
+  sitesList = sh (script: 'cat ${JENKINS_HOME}/athena/sites/prod.sites.txt', returnStdout: true).trim()
+}
+
+pipeline{
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'region', choices: ['us-east-2', 'eu-west-3'], description: 'Region that hosted Environment in AWS.')
+    choice(name: 'siteName', choices: "$sitesList", description: 'Sites to resize RDS Instance. Default is develop')
+    choice(name: 'rdsInstanceSize', choices: [
+      'db.t3.small', 'db.t3.medium',
+      'db.m5.large', 'db.m5.2xlarge', 'db.m5.4xlarge'
+      ], description: 'RDS Instance Size for resizing which support for import process.')
+  }
+
+  environment {
+    envType = 'prod'
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.CREATOR = "${BUILD_USER_ID}"
+              }
+              if(CREATOR == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Get AWS_CMD for env_type') {
+          steps {
+            script {
+              env.AWS_CMD = 'aws'
+              if(envType == 'prod') {
+                env.AWS_CMD = 'aws --profile prod'
+              } else {
+                env.AWS_CMD = 'aws'
+              }
+            }
+          }
+        }
+        stage('Resize RDS Instance') {
+          environment {
+            DB_INSTANCE_IDENTIFIER = "athena-${siteName}-rds"
+          }
+          steps {
+            echo "=> Resize RDS Instance to ${params.rds_instance_size}"
+            sh "${AWS_CMD} --region ${region} rds modify-db-instance --db-instance-identifier ${DB_INSTANCE_IDENTIFIER} --db-instance-class ${rdsInstanceSize} --apply-immediately"
+            echo "=> Wait for RDS Instance to be available"
+            sh "${AWS_CMD} --region ${region} rds wait db-instance-available --db-instance-identifier ${DB_INSTANCE_IDENTIFIER}"
+          }
+        }
+      }
+    }
+  }
+  post {
+    always {
+      echo "=> Clean Workspace after run"
+      cleanWs()
+    }
+    success {
+      echo "==> Build Success"
+    }
+    failure {
+      echo "==> Build Failure"
+    }
+  }
+}

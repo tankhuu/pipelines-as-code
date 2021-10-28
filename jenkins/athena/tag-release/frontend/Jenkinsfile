@@ -1,0 +1,118 @@
+// Notify to channel
+def notifyGChat(buildversion, releaseversion, channel, creator) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "Status: ${currentBuild.result}\nType: Frontend\nStage: Tag Release\nFromBuildVersion: ${buildversion}\nReleaseVersion: ${releaseversion}\nDuration: ${DURATION}\nCreator: ${creator}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack(buildversion, releaseversion, channel, creator) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *AthenaUI*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Status: *${currentBuild.result}*\nType: Frontend\nStage: Tag Release\nFromBuildVersion: ${buildversion}\n*ReleaseVersion: ${releaseversion}*\nDuration: ${DURATION}\nCreator: ${creator}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+
+pipeline {
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    string(name: 'build_version', description: 'Build Version of Image. Eg: ATH-BE-release/1.29.0-55')
+    string(name: 'release_version', description: "The Release Version Tag that QC/QA wants to add into Image. Notes: Tag shouldn't have space. Ex: 1.29.0 ")
+    string(name:'description', description: 'Description on the Release Version.')
+  }
+
+  environment {
+    GCHAT_TOKEN_RELEASE = "${GCHAT_TOKEN_ATH_RELEASE}"
+    SLACK_CHANNEL_RELEASE = "${SLACK_ATH_RELEASE}"
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.CREATOR = "$BUILD_USER_ID"
+              }
+              if(CREATOR == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Tag Release Version') {
+          steps {
+            echo "=> Tag FE Release Version"
+            sh "/usr/local/bin/tag-fe-release-version $build_version $release_version"
+            
+            echo "=> Add Release Version Information"
+            echo "CREATOR: ${CREATOR}"
+            echo "BuildVersion: ${build_version}"
+            echo "ReleaseVersion: ${release_version}"
+            echo "Description: ${description}"
+            script {
+              env.run_date = sh(script: "echo `date`", returnStdout: true).trim()
+            }
+            echo "Date: ${run_date}"
+          }
+          post {
+            success {
+              echo "Tag success for ReleaseVersion: ${params.release_version}"
+              notifyGChat("${build_version}", "${release_version}", "${GCHAT_TOKEN_RELEASE}", "${CREATOR}")
+              notifySlack("${build_version}", "${release_version}", "${SLACK_ATH_RELEASE}", "${CREATOR}")
+            }
+            failure {
+              echo "Tag failed for ReleaseVersion: ${params.release_version}"
+              notifyGChat("${build_version}", "${release_version}", "${GCHAT_TOKEN_RELEASE}", "${CREATOR}")
+              notifySlack("${build_version}", "${release_version}", "${SLACK_ATH_RELEASE}", "${CREATOR}")
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo '==> Clean up built after run'
+      cleanWs()
+    }
+    success {
+      echo "Job run success"
+    }
+    failure {
+      echo "Job run failed"
+    }
+  }
+}

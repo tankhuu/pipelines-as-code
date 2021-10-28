@@ -1,0 +1,217 @@
+// Notify to channel
+def notifyGChat(env_name, version, channel, creator) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "Status: *${currentBuild.result}*\nType: Frontend\nEnvType: Prod\nEnvironmentName: ${env_name}\n*ReleaseVersion*: ${version}\nDuration: ${DURATION}\nCreator: ${creator}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack(env_name, version, channel, creator) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *Athena UI*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Status: *${currentBuild.result}*\nType: Frontend\nEnvType: Prod\nEnvironmentName: ${env_name}\n*ReleaseVersion*: ${version}\nDuration: ${DURATION}\nCreator: ${creator}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+
+// Function Configure Package for deployment to Tenant
+def configurePackage(env, commit, env_type) {
+  def configFileName = 'systemconfig'
+  dir('dist/assets') {
+    sh "cp ${configFileName}.json /tmp/${configFileName}.${env}.json"
+    sh "update-fe-config ${configFileName} ${commit} ${env} ${env_type}"
+    sh "cp /tmp/${configFileName}.${env}.json ${configFileName}.json"
+    sh "cat ${configFileName}.json"
+  }
+}
+
+// Function deploy Frontend to Tenant
+def deployToTenant(env_type, domain, cloudfrontId) {
+  echo "=> Deploy to ${domain}"
+  AWS_CMD = 'aws'
+  if(env_type == 'prod') {
+    AWS_CMD = 'aws --profile prod'
+  }
+  dir('dist') {
+    echo "=> Remove files on s3://${domain}"
+    sh "${AWS_CMD} s3 rm s3://${domain} --recursive"
+    echo "=> Upload files to s3://${domain}"
+    sh "${AWS_CMD} s3 cp --acl public-read --recursive . s3://${domain}/"
+    echo "=> Set Cache-Control for Service Worker"
+    sh "${AWS_CMD} s3 cp --acl public-read --cache-control max-age=0 ./index.html s3://${domain}/"
+    sh "${AWS_CMD} s3 cp --acl public-read --cache-control max-age=0 ./ngsw-worker.js s3://${domain}/"
+    echo "=> Invalidate Cloudfront ${cloudfrontId}"
+    sh "${AWS_CMD} cloudfront create-invalidation --distribution-id ${cloudfrontId} --paths \"/*\""
+  }
+}
+
+node {
+    feReleasesList = sh (script: 'cat ${JENKINS_HOME}/athena/versions/release_frontend.txt', returnStdout: true).trim()
+    sitesList = sh (script: 'cat ${JENKINS_HOME}/athena/sites/prod.sites.txt', returnStdout: true).trim()
+}
+
+pipeline {
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'TENANT', choices: "${sitesList}", description: 'Tenant to deploy') 
+    choice(name: 'RELEASE_VERSION', choices: "${feReleasesList}", description: 'Release Version tagged by QA/QC. Ex: 1.29.0')
+  }
+
+  environment {
+    ENV = 'prod'
+    CONFIG_FILE = 'systemconfig'
+    BASE_DOMAIN = 'etstack.io'
+
+    GCHAT_TOKEN = "${GCHAT_TOKEN_ATH_RELEASE}"
+    SLACK_CHANNEL = "${SLACK_ATH_RELEASE}"
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.CREATOR = "${BUILD_USER_ID}"
+              }
+              if(CREATOR == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Get environment information') {
+          steps {
+            echo "=> EnvName: ${params.TENANT}"
+            script {
+              env.ENV_NAME = "${TENANT}"
+              env.DOMAIN = "${TENANT}.${BASE_DOMAIN}"
+              switch(TENANT) {
+                case 'caddo-community':
+                  env.CF_ID = 'E1U5XI0JB0MBKN'
+                  break
+                case 'manitouspring':
+                  env.CF_ID = 'E1MKWWV36DW4OG'
+                  break
+                case 'south-lane':
+                  env.CF_ID = 'E141S253TM9ZHA'
+                  break
+                case 'midlandpublicschools':
+                  env.CF_ID = 'E2BIDT9V3O7JFT'
+                  break
+                case 'santaritaca-ca':
+                  env.CF_ID = 'E5MGFURF3WUTE'
+                  break
+                case 'mattoon-il':
+                  env.CF_ID = 'E9E30ORK7ZL6N'
+                  break
+                case 'redlakemn':
+                  env.CF_ID = 'E2U6MGZ3QIGNOL'
+                  break
+                case 'chiefleschi-mvp':
+                  env.CF_ID = 'EHBPJTVP3PVYD'
+                  break
+                case 'chiefleschi-mvp-2':
+                  env.CF_ID = 'EP51AG9K7H5SZ'
+                  break
+                case 'edulog-training':
+                  env.CF_ID = 'EML6P7JO34YQ1'
+                  break
+                case 'frenchtown-1':
+                  env.DOMAIN = "athena-${TENANT}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E3JPL17MQVCVTG'
+                  break
+                case 'cl-mvp-databuild':
+                  env.CF_ID = 'E1FAKFBZXLM8KL'
+                  break
+                case 'uat01':
+                  env.CF_ID = 'E3JYVL6SGFBBRI'
+                  break
+                case 'uat02':
+                  env.CF_ID = 'E2CDHIMIGDA29R'
+                  break
+                case 'emmett-id':
+                  env.CF_ID = 'E2TBWMYLIOB9H2'
+                  break
+                default:
+                  env.CF_ID = ''
+                  break
+              }
+            }
+          }
+        }
+        stage('Pull package') {
+          steps {
+            echo "=> Download artifact from Athena AWS Account"
+            sh 'aws s3 cp s3://${ATH_S3_ARTIFACTS_BUCKET}/frontend/release/${RELEASE_VERSION}.tar.gz .'
+            sh 'tar zxvf ${RELEASE_VERSION}.tar.gz'
+          }
+        }
+        stage("Deploy to Environment") {
+          steps {
+            echo "=> Configure Environment"
+            configurePackage("${ENV_NAME}", "${RELEASE_VERSION}", "${ENV}")
+
+            echo "=> Deploy ${DOMAIN} with CF_ID: ${CF_ID}"
+            deployToTenant("${ENV}", "${DOMAIN}", "${CF_ID}")
+          }
+          post {
+            success {
+              echo "Deploy success for ${TENANT}"
+              notifyGChat("${TENANT}", "${RELEASE_VERSION}", "${GCHAT_TOKEN}", "${CREATOR}")
+              notifySlack("${TENANT}", "${RELEASE_VERSION}", "${SLACK_CHANNEL}", "${CREATOR}")
+            }
+            failure {
+              echo "Deploy failed for ${TENANT}"
+              notifyGChat("${TENANT}", "${RELEASE_VERSION}", "${GCHAT_TOKEN}", "${CREATOR}")
+              notifySlack("${TENANT}", "${RELEASE_VERSION}", "${SLACK_CHANNEL}", "${CREATOR}")
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo '==> Clean up built after run'
+      cleanWs()
+    }
+    success {
+      echo "Job run success"
+    }
+    failure {
+      echo "Job run failed"
+    }
+  }
+}

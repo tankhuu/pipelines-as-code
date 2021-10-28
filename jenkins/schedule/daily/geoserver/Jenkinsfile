@@ -1,0 +1,81 @@
+
+// Notify to channel
+def notifyGChat() {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "_${currentBuild.result}_\nDuration: ${DURATION}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack() {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *Subject here!*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Status: *${currentBuild.result}*\nDuration: ${DURATION}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+
+pipeline{
+  agent any
+
+  environment {
+    envType = 'prod'
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        echo "=> Checkout Athena Monitoring Repository"
+        script {
+          def scmVars = checkout([
+            $class: 'GitSCM', 
+            branches: [[name: '*/master']],
+            userRemoteConfigs: [[
+              url: 'git@github.com:eduloginc/athena-monitoring.git', 
+              credentialsId: 'eduloginc-git-tankhuu'
+              ]]
+          ])
+        }
+      }
+    }
+    stage('Daily Backup GeoServer Data for Prod Sites') {
+      steps {
+        sh 'ansible-playbook -i ansible/inventory/prod.aws_ec2.yml ansible/backup_geoserver_data_prod.yml; if [ $? = 4 ]; then echo "Exit Code 4"; fi'
+      }
+    }
+    stage('Daily Backup GeoServer Data for NonProd Sites') {
+      steps {
+        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+          sh 'ansible-playbook -i ansible/inventory/nonprod.aws_ec2.yml ansible/backup_geoserver_data.yml; if [ $? = 4 ]; then echo "Exit Code 4"; fi'
+        }
+      }
+    }
+  }
+  post {
+    always {
+      echo "=> Clean Workspace after run"
+      cleanWs()
+    }
+    success {
+      echo "==> Build Success"
+    }
+    failure {
+      echo "==> Build Failure"
+    }
+  }
+}

@@ -1,0 +1,128 @@
+// Notify to channel
+def notifyGChat(branch, version, commit, channel) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "BUILD & PACKAGE: ${currentBuild.result}\nService: Athena\nBranch: ${branch}\n*BuildVersion*: ${version}\nCommit: ${commit}\nDuration: ${DURATION}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack(branch, version, commit, channel) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *AthenaUI - #${branch}*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "BUILD & PACKAGE: *${currentBuild.result}*\nService: Athena\nBranch: ${branch}\n*BuildVersion*: ${version}\nCommit: ${commit}\nDuration: ${DURATION}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+pipeline{
+  agent any
+
+  environment {
+    BRANCH_NAME = GIT_BRANCH.substring(GIT_BRANCH.lastIndexOf('/') + 1, GIT_BRANCH.length()).trim()
+    SHORT_COMMIT = GIT_COMMIT.substring(0,7)
+    BUILD_VERSION = "${GIT_COMMIT}"
+    
+    SERVICE_NAME = 'athena'
+    ARTIFACT_PATH = "s3://${ATH_S3_ARTIFACTS_BUCKET}/backend/build/athena"
+    JOB_DEPLOY = 'athena/backend/deployment/be-cd'
+
+    GCHAT_TOKEN = "${GCHAT_TOKEN_ATH_BE_CICD}"
+  }
+
+  stages {
+    stage('Build') {
+      steps {
+        echo "=> Build Service for branch: ${env.BRANCH_NAME}"
+        dir('Source/BuildAggregator') {
+          echo "==> Build Services with build_version: ${env.BUILD_VERSION}"
+          sh 'mvn clean install -DskipTests -e -U'
+        }
+      }
+    }
+    stage('Package') {
+      steps {
+        echo "=> Prepare for package jar files"
+        dir("${JENKINS_HOME}/.m2/repository/com/edulog") {
+          sh '''#!/bin/bash -xe
+            BUILD_DIR=/tmp/${BUILD_VERSION}
+            mkdir -p /tmp/${BUILD_VERSION}
+            cp -p RoutingServer/0.1.0/RoutingServer-0.1.0.jar $BUILD_DIR/RoutingServer.jar
+            cp -p ReportsServer/0.1.0/ReportsServer-0.1.0.jar $BUILD_DIR/ReportsServer.jar
+            cp -p TransactionHUBV2/2.1.0/TransactionHUBV2-2.1.0.jar $BUILD_DIR/TransactionHUBV2.jar
+            cp -p RoutingMigration/1.0/RoutingMigration-1.0.jar $BUILD_DIR/RoutingMigration.jar
+            cp -p PlannedRollover/2.1.0/PlannedRollover-2.1.0.jar $BUILD_DIR/PlannedRollover.jar
+            ls -l $BUILD_DIR
+          '''
+        }
+        echo "=> Package jar files"
+        sh """#!/bin/bash
+          cd /tmp
+          tar zcvf ${BUILD_VERSION}.tar.gz ${BUILD_VERSION}
+        """
+        echo "=> Upload Artifact to S3"
+        sh '''#!/bin/bash -xe
+          aws s3 cp /tmp/${BUILD_VERSION}.tar.gz ${ARTIFACT_PATH}/
+        '''
+        echo "=> Cleanup temporary files & folders"
+        sh """#!/bin/bash
+          cd /tmp
+          rm -f ${BUILD_VERSION}.tar.gz
+          rm -rf ${BUILD_VERSION}
+        """
+      }
+      post {
+        failure {
+          echo "=> Build failure"
+          notifyGChat("${BRANCH_NAME}", "${BUILD_VERSION}", "${SHORT_COMMIT}", "${GCHAT_TOKEN}")
+        }
+        success {
+          echo "=> Build success"
+          notifyGChat("${BRANCH_NAME}", "${BUILD_VERSION}", "${SHORT_COMMIT}", "${GCHAT_TOKEN}")
+        }
+      }
+    }
+    stage('Deploy') {
+      when { anyOf { 
+        branch 'development-ktvn'; 
+        branch 'ktvn'; 
+        branch 'fr'; 
+        branch 'develop';
+        branch 'master';
+        branch pattern: "release/.+", comparator: "REGEXP" 
+      } }
+      steps {
+        build job: "${JOB_DEPLOY}", parameters: [
+          string(name: 'branch_name', value: "${BRANCH_NAME}"),
+          string(name: 'service', value: "${SERVICE_NAME}"),
+          string(name: 'binary_path', value: "${ARTIFACT_PATH}/${BUILD_VERSION}.tar.gz"),
+          string(name: 'version', value: "${BUILD_VERSION}")]
+      }
+    }
+  }
+  post {
+    always {
+      echo "=> Clean Workspace after run"
+      // cleanWs()
+    }
+    success {
+      echo "==> Build Success"
+    }
+    failure {
+      echo "==> Build Failure"
+    }
+  }
+}

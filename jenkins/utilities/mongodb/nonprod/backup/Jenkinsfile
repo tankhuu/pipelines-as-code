@@ -1,0 +1,133 @@
+
+// Notify to channel
+def notifyGChat() {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "_${currentBuild.result}_\nDuration: ${DURATION}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack() {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *Subject here!*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Status: *${currentBuild.result}*\nDuration: ${DURATION}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+
+node {
+  sitesList = sh (script: 'cat ${JENKINS_HOME}/athena/sites/nonprod.sites.txt', returnStdout: true).trim()
+}
+
+pipeline{
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    string(name: 'description', description: 'Description of the Snapshot. Should add it for distinguishing with other Snapshot.')
+    choice(name: 'siteName', choices: "${sitesList}", description: 'SiteName to take DB snapshot from.')
+    choice(name: 'region', choices: ['ohio', 'paris'], description: 'AWS Region that is hosting this Site.')
+  }
+
+  environment {
+    envType = 'nonprod'
+    S3_BUCKET_NAME = 'edulog-athena-backup'
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.CREATOR = "${BUILD_USER_ID}"
+              }
+              if(CREATOR == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Get AWS_CMD for env_type') {
+          steps {
+            script {
+              env.AWS_CMD = 'aws'
+              env.REGION = 'us-east-2'
+              if(envType == 'prod') {
+                env.AWS_CMD = 'aws --profile prod'
+              } else {
+                env.AWS_CMD = 'aws'
+              }
+              if(params.region == 'paris') {
+                env.REGION = 'eu-west-3'
+                env.AWS_CMD += " --region $REGION"
+              }
+              env.runDate = sh(script: "echo `date +%Y%m%d-%H%M%S`", returnStdout: true).trim()
+              // Get CQ_ASG_NAME from AWS Parameter Store
+              env.CQ_ASG_NAME = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${envType}/${siteName}/cq_asg --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+            }
+          }
+        }
+        stage('Backup MongoDB') {
+          environment {
+            ip_addresses = sh(script: "/usr/local/bin/getip_fromasg get_private_ip --region=${REGION} --name=${CQ_ASG_NAME}", returnStdout: true).trim()
+          }
+          steps {
+            
+            script {
+              ip_addresses.tokenize(',[]').each { ip ->
+                ip = ip.trim()
+                dir('scripts/bash') {
+                  echo "=> Run script backup mongoDB"
+                  // Default Snapshot file name is: <db_name>-<environment>.<YYYYMMDD-HHmm>
+                  sh "/bin/sh mongodb_backup.sh ${envType} ${siteName} ${ip} ${S3_BUCKET_NAME} ${runDate}"
+                  echo "=> Backup Description: ${description}"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  post {
+    always {
+      echo "=> Clean Workspace after run"
+      cleanWs()
+    }
+    success {
+      echo "==> Build Success"
+    }
+    failure {
+      echo "==> Build Failure"
+    }
+  }
+}

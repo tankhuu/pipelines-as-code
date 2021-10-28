@@ -1,0 +1,173 @@
+// Notify to channel
+def notifyGChat(buildversion, releaseversion, channel, creator) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "Status: ${currentBuild.result}\nType: Backend\nStage: Tag Release\nFromBuildVersion: ${buildversion}\nReleaseVersion: ${releaseversion}\nDuration: ${DURATION}\nCreator: ${creator}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack(buildversion, releaseversion, channel, creator) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *Athena Backend*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Status: *${currentBuild.result}*\nType: Backend\nStage: Tag Release\nFromBuildVersion: ${buildversion}\n*ReleaseVersion: ${releaseversion}*\nDuration: ${DURATION}\nCreator: ${creator}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+
+pipeline {
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    string(name: 'release_version', description: "The Release Version Tag that QC/QA wants to add into Image. Notes: Tag shouldn't have space. Ex: 1.29.0 ")
+    string(name:'description', description: 'Description on the Release Version.')
+  }
+
+  environment {
+    profile = 'prod'
+    prod_account_id = '690893158275'
+    region = 'us-east-2'
+    dest_region = 'eu-west-3'
+    version_file = '/var/lib/jenkins/athena/versions/release_backend.txt'
+    IMAGE_BUILD_VERSION = "HOTFIX-BE-${release_version}-${BUILD_NUMBER}"
+
+    GCHAT_TOKEN_RELEASE = "${GCHAT_TOKEN_ATH_RELEASE}"
+    SLACK_CHANNEL_RELEASE = "${SLACK_ATH_RELEASE}"
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.CREATOR = "$BUILD_USER_ID"
+              }
+              echo "Creator: $CREATOR"
+              if(CREATOR == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Create BuildVersion for Backend -> AWS AMI') {
+          environment {
+            ENV_TYPE = 'nonprod'
+            ENV_NAME = 'hotfix'
+            BE_ASG_NAME = sh(script: "aws ssm get-parameter --name /edulog/athena/${ENV_TYPE}/${ENV_NAME}/be_asg --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+            ip_addresses = sh(script: "/usr/local/bin/getsingleip_fromasg get_private_ip --name=${BE_ASG_NAME}", returnStdout: true).trim()
+            SERVICE_VERSIONS = sh(script: "ssh -t ${ip_addresses} '/usr/local/bin/get-service-versions'", returnStdout: true).trim()
+            INSTANCE_ID = sh(script: "/usr/local/bin/check_asg get_instance_id --asgname=${BE_ASG_NAME}", returnStdout: true).trim()
+          }
+          steps {
+            echo "==> Create AWS AMI from BE Hotfix Environment"
+            script {
+              env.IMAGE_ID = sh(script: "create-be-build-version ${INSTANCE_ID} ${INSTANCE_ID} ${IMAGE_BUILD_VERSION} ${SERVICE_VERSIONS}", returnStdout: true).trim()
+            }
+          }
+        }
+        stage('Get ImageId') {
+          steps {
+            script {
+                echo "=> Build version $IMAGE_BUILD_VERSION"
+                env.image_id = sh(script: "/usr/local/bin/get_ami_from_build_version $IMAGE_BUILD_VERSION", returnStdout: true).trim()
+            }
+          }
+        }
+        stage('Tag Image') {
+          steps {
+            echo "=> Tag BE Release Version"
+            sh "/usr/local/bin/tag_be_release_version ${image_id} ${release_version}-hotfix"
+          }
+        }
+        stage('Share AMI to Prod and Paris') {
+          steps {
+            script {
+              env.AMI_NAME = "ATH-$IMAGE_BUILD_VERSION"
+            }
+            echo "=> Share Release Version to Prod Account with image name $AMI_NAME"
+            sh "/usr/bin/python3 /usr/local/bin/AwsAmi.py share --image_id=${image_id} --account_id=${prod_account_id}"
+
+            echo "=> Tag Release Version Image in Prod Account"
+            sh "/usr/bin/python3 /usr/local/bin/AwsAmi.py tag --image_id=${image_id} --region=${region} --profile=${profile}"
+            
+            echo "=> NonProd - Copy Release Version to Paris"
+            script {
+              env.DEST_AMI_ID = sh(script: "/usr/bin/python3 /usr/local/bin/copy_ami.py copy --ami_name=${AMI_NAME} --ami_id=${image_id} --region=${region} --dest_region=${dest_region}", returnStdout: true).trim()
+            }
+            echo "=> NonProd - Tag Release Version on Paris AMI"
+            sh "/usr/bin/python3 /usr/local/bin/tag_ami.py tag --ami_id=${image_id} --region=${region} --dest_ami_id=${DEST_AMI_ID} --dest_region=${dest_region}"
+
+            // echo "=> Prod - Share Release Version to Paris"
+            // sh '/usr/bin/python3 /usr/local/bin/AwsAmi.py share --image_id=${DEST_AMI_ID} --account_id=${prod_account_id}'
+            
+            // echo "=> Prod - Tag Release Version on Paris AMI"
+            // sh "/usr/bin/python3 /usr/local/bin/tag_ami.py tag --profile=${profile} --ami_id=${image_id} --region=${region} --dest_ami_id=${DEST_AMI_ID} --dest_region=${dest_region}"
+          }
+        }
+        stage('Add release_version into note') {
+          steps {
+            echo "Gonna add release_version into note"
+            sh '''
+              #!/bin/bash
+              awk -v rv=$release_version -i inplace 'BEGINFILE{print rv}{print}' $version_file
+            '''
+          }
+          // post {
+          //   success {
+          //     echo "Tag success for ReleaseVersion: ${params.release_version}"
+          //     notifyGChat("${build_version}", "${release_version}", "${GCHAT_TOKEN_RELEASE}", "${CREATOR}")
+          //     notifySlack("${build_version}", "${release_version}", "${SLACK_CHANNEL_RELEASE}", "${CREATOR}")
+          //   }
+          //   failure {
+          //     echo "Tag failed for ReleaseVersion: ${params.release_version}"
+          //     notifyGChat("${build_version}", "${release_version}", "${GCHAT_TOKEN_RELEASE}", "${CREATOR}")
+          //     notifySlack("${build_version}", "${release_version}", "${SLACK_CHANNEL_RELEASE}", "${CREATOR}")
+          //   }
+          // }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo '==> Clean up built after run'
+      cleanWs()
+    }
+    success {
+      echo "Job run success"
+    }
+    failure {
+      echo "Job run failed"
+    }
+  }
+}

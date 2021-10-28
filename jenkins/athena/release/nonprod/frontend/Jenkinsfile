@@ -1,0 +1,322 @@
+// Notify to channel
+def notifyGChat(env_name, version, channel, creator) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "Status: *${currentBuild.result}*\nType: Frontend\nEnvType: NonProd\nEnvironmentName: ${env_name}\n*ReleaseVersion*: ${version}\nDuration: ${DURATION}\nCreator: ${creator}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack(env_name, version, channel, creator) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *Athena UI*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Status: *${currentBuild.result}*\nType: Frontend\nEnvType: NonProd\nEnvironmentName: ${env_name}\n*ReleaseVersion*: ${version}\nDuration: ${DURATION}\nCreator: ${creator}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+
+// Function Configure Package for deployment to Tenant
+def configurePackage(env, commit, env_type) {
+  def configFileName = 'systemconfig'
+  dir('dist/assets') {
+    sh "cp ${configFileName}.json /tmp/${configFileName}.${env}.json"
+    sh "update-fe-config ${configFileName} ${commit} ${env} ${env_type}"
+    sh "cp /tmp/${configFileName}.${env}.json ${configFileName}.json"
+    sh "cat ${configFileName}.json"
+  }
+}
+
+// Function deploy Frontend to Tenant
+def deployToTenant(env_type, domain, cloudfrontId) {
+  echo "=> Deploy to ${domain}"
+  AWS_CMD = 'aws'
+  if(env_type == 'prod') {
+    AWS_CMD = 'aws --profile prod'
+  }
+  dir('dist') {
+    echo "=> Remove files on s3://${domain}"
+    sh "${AWS_CMD} s3 rm s3://${domain} --recursive"
+    echo "=> Upload files to s3://${domain}"
+    sh "${AWS_CMD} s3 cp --acl public-read --recursive . s3://${domain}/"
+    echo "=> Set Cache-Control for Service Worker"
+    sh "${AWS_CMD} s3 cp --acl public-read --cache-control max-age=0 ./index.html s3://${domain}/"
+    sh "${AWS_CMD} s3 cp --acl public-read --cache-control max-age=0 ./ngsw-worker.js s3://${domain}/"
+    echo "=> Invalidate Cloudfront ${cloudfrontId}"
+    sh "${AWS_CMD} cloudfront create-invalidation --distribution-id ${cloudfrontId} --paths \"/*\""
+  }
+}
+
+node {
+    feReleasesList = sh (script: 'cat ${JENKINS_HOME}/athena/versions/release_frontend.txt', returnStdout: true).trim()
+    sitesList = sh (script: 'cat ${JENKINS_HOME}/athena/sites/nonprod.sites.txt', returnStdout: true).trim()
+}
+
+pipeline {
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'TENANT', choices: "${sitesList}", description: 'Tenant to deploy') 
+    choice(name: 'RELEASE_VERSION', choices: "${feReleasesList}", description: 'Release Version tagged by QA/QC. Ex: 1.29.0')
+  }
+  
+  environment {
+    ENV = 'nonprod'
+    CONFIG_FILE = 'systemconfig'
+    BASE_DOMAIN = 'athena-nonprod.com'
+
+    GCHAT_TOKEN = "${GCHAT_TOKEN_ATH_RELEASE}"
+    SLACK_CHANNEL = "${SLACK_ATH_RELEASE}"
+  }
+
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.CREATOR = "$BUILD_USER_ID"
+              }
+              if(CREATOR == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Get environment information') {
+          steps {
+            echo "=> EnvName: ${params.TENANT}"
+            script {
+              env.ENV_NAME = "${TENANT}"
+              env.DOMAIN = "${TENANT}.${BASE_DOMAIN}"
+              switch(TENANT) {
+                case 'demo':
+                  env.DOMAIN = "athena-${TENANT}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E3KLVVQ41JU8TM'
+                  break
+                case 'demoleg':
+                  env.DOMAIN = "athena-${TENANT}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E3IRPT5SPYKNYM'
+                  break
+                case 'chiefleschi-wa':
+                  env.DOMAIN = "athena-${TENANT}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E1ZV9QOEND1SX3'
+                  break
+                case 'chiefleschi-wa-2':
+                  env.DOMAIN = "athena-${TENANT}.${BASE_DOMAIN}"
+                  env.CF_ID = 'EK3YITKEBQIT7'
+                  break
+                case 'chiefleschi-wa-3':
+                  env.DOMAIN = "athena-${TENANT}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E2E6JLA14BCUVI'
+                  break
+                case 'chiefleschi-wa-4':
+                  env.DOMAIN = "athena-${TENANT}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E3P1NIILF5C005'
+                  break
+                case 'southlane':
+                  env.DOMAIN = "athena-${TENANT}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E2HZ8PE5SF05UQ'
+                  break
+                case 'hopewell-va-internal':
+                  env.DOMAIN = "athena-${TENANT}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E2J47AART2ZMVI'
+                  break
+                case 'manitou-co-internal':
+                  env.DOMAIN = "athena-${TENANT}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E11S5BB9OIYQUZ'
+                  break
+                case 'vbtelematics':
+                  env.DOMAIN = "athena-${TENANT}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E1AQES617RPRAA'
+                  break
+                case 'frenchtown':
+                  env.DOMAIN = "athena-${TENANT}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E2AXLZ8DOGUAUP'
+                  break
+                case 'frenchtown-5':
+                  env.CF_ID = 'E1WVBTTOG4VT8W'
+                  break
+                case 'frenchtown-demo':
+                  env.CF_ID = 'EA9V1YERLPBER'
+                  break
+                case 'frenchtown-sales':
+                  env.CF_ID = 'E2N2WG1SWC15DM'
+                  break
+                case 'frenchtown-sales-1':
+                  env.CF_ID = 'E3VR95O1T7GIEL'
+                  break
+                case 'puydedome':
+                  env.DOMAIN = "${TENANT}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E3N9K4P2NYTJWU'
+                  break
+                case 'redlake':
+                  env.DOMAIN = "athena-${TENANT}.${BASE_DOMAIN}"
+                  env.CF_ID = 'E3AE4RTC5N7NB8'
+                  break
+                case 'opt-release':
+                  env.CF_ID = 'EQJIRP4LU9YFR'
+                  break
+                case 'opt-release-2':
+                  env.CF_ID = 'E2H3FOY5ZDQ12V'
+                  break
+                case 'vb':
+                  env.CF_ID = 'EYN2HJSHM7C9W'
+                  break
+                case 'vb-e1':
+                  env.CF_ID = 'E2GUTOC7IV24SS'
+                  break
+                case 'vb-e3':
+                  env.CF_ID = 'EKM3XC3ZWVQLT'
+                  break
+                case 'vb-staticdynamic':
+                  env.CF_ID = 'E3CQ596M86QDF'
+                  break
+                case 'vb-static':
+                  env.CF_ID = 'E27JQJUEKDFQ2B'
+                  break
+                case 'release-2':
+                  env.CF_ID = 'E2SIZQ7QT5S3MA'
+                  break
+                case 'release-3':
+                  env.CF_ID = 'E36RZW41VY8GQA'
+                  break
+                case 'smokeleg':
+                  env.CF_ID = 'E2V9HDF0IYB90I'
+                  break
+                case 'vn-data-import-testing':
+                  env.CF_ID = 'ENKY2W5FFHCRV'
+                  break
+                case 'data':
+                  env.CF_ID = 'E1I4WVO0D5AOD7'
+                  break
+                case 'telematics':
+                  env.CF_ID = 'E1V43KWJ946D8X'
+                  break
+                case 'south-lane':
+                  env.CF_ID = 'E2Q0TH07IQSBOY'
+                  break                
+                case 'south-lane':
+                  env.CF_ID = 'E2Q0TH07IQSBOY'
+                  break                
+                case 'missoulacloud1':
+                  env.CF_ID = 'E15I7B3FQOPNNZ'
+                  break                
+                case 'missoulacloud2':
+                  env.CF_ID = 'E2BFKGQ10IY41X'
+                  break                
+                case 'missoulacloud3':
+                  env.CF_ID = 'E1NEO2864NP39U'
+                  break                
+                case 'missoulacloud4':
+                  env.CF_ID = 'E1CZFWPMAGX8AY'
+                  break                
+                case 'missoula5':
+                  env.CF_ID = 'E3ENR575B3876R'
+                  break                
+                case 'missoula6':
+                  env.CF_ID = 'E1THSWPUJAFOUK'
+                  break                
+                case 'missoula7':
+                  env.CF_ID = 'E1B2YHQW10GF8A'
+                  break               
+                case 'missoula8':
+                  env.CF_ID = 'E3C4POVXX8PXC8'
+                  break               
+                case 'hotfix':
+                  env.CF_ID = 'E38JSMBT2A8088'
+                  break               
+                case 'e2esdi':
+                  env.CF_ID = 'E1NHCKJCXLPI28'
+                  break               
+                case 'emmetidaho':
+                  env.CF_ID = 'E3M6QIECQAKT6P'
+                  break
+                case 'midland':
+                  env.CF_ID = 'E1JGBO4BCZIL7C'
+                  break
+                case 'test-deployment-1':
+                  env.CF_ID = 'ENZFR2LEL3VET'
+                  break
+                case 'test-deployment-3':
+                  env.CF_ID = 'E15SPJQDG65PZ5'
+                  break
+                default:
+                  env.CF_ID = ''
+                  break
+              }
+            }
+          }
+        }
+        stage('Pull package') {
+          steps {
+            sh 'aws s3 cp s3://${ATH_S3_ARTIFACTS_BUCKET}/frontend/release/${RELEASE_VERSION}.tar.gz .'
+            sh 'tar zxvf ${RELEASE_VERSION}.tar.gz'
+          }
+        }
+        stage("Deploy to Environment") {
+          steps {
+            echo "=> Configure Environment"
+            configurePackage("${ENV_NAME}", "${RELEASE_VERSION}", "${ENV}")
+
+            echo "=> Deploy ${DOMAIN} with CF_ID: ${CF_ID}"
+            deployToTenant("${ENV}", "${DOMAIN}", "${CF_ID}")
+          }
+          post {
+            success {
+              echo "Deploy success for ${TENANT}"
+              notifyGChat("${TENANT}", "${RELEASE_VERSION}", "${GCHAT_TOKEN}", "${CREATOR}")
+              notifySlack("${TENANT}", "${RELEASE_VERSION}", "${SLACK_CHANNEL}", "${CREATOR}")
+            }
+            failure {
+              echo "Deploy failed for ${TENANT}"
+              notifyGChat("${TENANT}", "${RELEASE_VERSION}", "${GCHAT_TOKEN}", "${CREATOR}")
+              notifySlack("${TENANT}", "${RELEASE_VERSION}", "${SLACK_CHANNEL}", "${CREATOR}")
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo '==> Clean up built after run'
+      cleanWs()
+    }
+    success {
+      echo "Job run success"
+    }
+    failure {
+      echo "Job run failed"
+    }
+  }
+}

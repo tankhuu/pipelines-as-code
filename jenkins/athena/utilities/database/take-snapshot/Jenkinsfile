@@ -1,0 +1,123 @@
+
+// Notify to channel
+def notifyGChat(name, desc, s3_uri, channel) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "Action: TAKE_DB_SNAPSHOT\nStatus: _${currentBuild.result}_\nDuration: ${DURATION}\nName: ${name}\nDescription: ${desc}\nS3_URI: ${s3_uri}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack(name, desc, s3_uri, channel) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *Subject here!*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Action: TAKE_DB_SNAPSHOT\nStatus: *${currentBuild.result}*\nDuration: ${DURATION}\nName: ${name}\nDescription: ${desc}\nS3_URI: ${s3_uri}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+
+node {
+  environmentList = sh(script: "aws ssm get-parameter --name /edulog/athena/nonprod/development/environments --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+}
+
+pipeline{
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'env_type', choices: ['nonprod', 'prod'], description: 'Type of Environment to take snapshot. Currently supports for nonprod only.')
+    choice(name: 'environment', 
+      choices: "$environmentList",
+      description: 'Environment to take DB snapshot from. Default is develop')
+    password(name: 'db_pass', defaultValue: 'rU18iWV4qxKU', description: 'Password for user postgres of RDS')
+    string(name: 'db_name', defaultValue: 'Athena', description: 'Name of the Database that need to take snapshot. Default is Athena.')
+    string(name: 'name', defaultValue: 'FirstSnapshotOfDevelopEnv', description: 'Name of the Snapshot. Only Accept Alphabets Characters and Hiphens.')
+    string(name: 'description', defaultValue: 'This is my first snapshot for Develop Env RDS', description: 'Description for the Snapshot.')
+  }
+
+  environment {
+    S3_BUCKET_NAME = 'edulog-athena-backup'
+    GCHAT_TOKEN = "${GCHAT_TOKEN_ATH_UTIL}"
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Get AWS_CMD for env_type') {
+          steps {
+            script {
+              env.AWS_CMD = 'aws'
+              if(env_type == 'prod') {
+                env.AWS_CMD = 'aws --profile prod'
+              } else {
+                env.AWS_CMD = 'aws'
+              }
+            }
+          }
+        }
+        stage('Snapshot database') {
+          environment {
+            RDS_EP = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${env_type}/${environment}/rds_endpoint --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+          }
+          steps {
+            dir('scripts/bash') {
+              echo "=> Run script take snapshot"
+              script {
+                env.TAGS = '''"{\\"TagSet\\":[{\\"Key\\":\\"Name\\",\\"Value\\":\\"${name}\\"},{\\"Key\\":\\"Description\\",\\"Value\\":\\"${description}\\"}]}"'''
+              }
+              echo "TAGS: ${TAGS}"
+              // Default Snapshot file name is: <db_name>-<environment>.<YYYYMMDD-HHmm>
+              sh "/bin/sh snapshot.sh ${env_type} ${environment} ${RDS_EP} ${db_pass} ${S3_BUCKET_NAME}"
+              script {
+                env.S3_KEY = sh(script: 'cat TMP_S3_KEY', returnStdout: true).trim()
+                env.S3_URI = "${S3_BUCKET_NAME}/${S3_KEY}"
+              }
+              echo "=> Snapshot Full Path: ${S3_KEY}"
+              echo "=> Tag Name & Description for Snapshot"
+              sh '''aws s3api put-object-tagging --bucket $S3_BUCKET_NAME --key ${S3_KEY} --tagging ${TAGS}'''
+            }
+          }
+        }
+      }
+      // post {
+      //   always {
+      //     echo "=> Clean Workspace after run"
+      //     cleanWs()
+      //   }
+      //   success {
+      //     echo "==> Build Success"
+      //     notifyGChat("${name}", "${description}", "${S3_URI}", "${GCHAT_TOKEN}")
+      //   }
+      //   failure {
+      //     echo "==> Build Failure"
+      //     notifyGChat("${name}", "${description}", "${S3_URI}", "${GCHAT_TOKEN}")
+      //   }
+      // }
+    }
+  }
+}

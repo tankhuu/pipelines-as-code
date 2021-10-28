@@ -1,0 +1,81 @@
+node {
+    gatewayReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/gatewayReleases.txt', returnStdout: true).trim()
+    tnxhubReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/tnxhubReleases.txt', returnStdout: true).trim()
+    routingReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/routingReleases.txt', returnStdout: true).trim()
+    geocodeReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/geocodeReleases.txt', returnStdout: true).trim()
+    importReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/importReleases.txt', returnStdout: true).trim()
+    plannedrolloverReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/plannedrolloverReleases.txt', returnStdout: true).trim()
+    reportReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/reportReleases.txt', returnStdout: true).trim()
+    overlayReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/overlayReleases.txt', returnStdout: true).trim()
+    aggregateReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/aggregateReleases.txt', returnStdout: true).trim()
+    rresReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/rresReleases.txt', returnStdout: true).trim()
+    edtaReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/edtaReleases.txt', returnStdout: true).trim()
+    ivinReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/ivinReleases.txt', returnStdout: true).trim()
+    commanddistributorReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/commanddistributorReleases.txt', returnStdout: true).trim()
+    geocalculationReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/geocalculationReleases.txt', returnStdout: true).trim()
+    specialneedsReleases = sh (script: 'cat ${JENKINS_HOME}/athena/versions/specialneedsReleases.txt', returnStdout: true).trim()
+}
+
+pipeline {
+  agent any
+  
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'gatewayVersion', choices: "${gatewayReleases}", description: 'Release Version of Gateway Service, If set no, service will not be deployed. Eg. 1.29.15')
+    choice(name: 'txnhubVersion', choices: "${txnhubReleases}", description: 'Release Version of TransactionHub Service, If set no, service will not be deployed. Eg. 1.29.15')
+    choice(name: 'routingVersion', choices: "${routingReleases}", description: 'Release Version of Routing Service, If set no, service will not be deployed. Eg. 1.29.15')
+    choice(name: 'geocodeVersion', choices: "${geocodeReleases}", description: 'Release Version of GeoCode Service, If set no, service will not be deployed. Eg. 1.29.15')
+    choice(name: 'importVersion', choices: "${importReleases}", description: 'Release Version of Importing Service, If set no, service will not be deployed. Eg. 1.29.15')
+    choice(name: 'plannedrolloverVersion', choices: "${plannedrolloverReleases}", description: 'Release Version of PlannedRollover Service, If set no, service will not be deployed. Eg. 1.29.15')
+    choice(name: 'reportVersion', choices: "${reportReleases}", description: 'Release Version of Report Service, If set no, service will not be deployed. Eg. 1.29.15')
+    choice(name: 'overlayVersion', choices: "${overlayReleases}", description: 'Release Version of Overlay Service, If set no, service will not be deployed. Eg. 1.29.15')
+    choice(name: 'aggregateVersion', choices: "${aggregateReleases}", description: 'Release Version of Aggregate Service, If set no, service will not be deployed. Eg. 1.29.15')
+    choice(name: 'rresVersion', choices: "${rresReleases}", description: 'Release Version of RideRegistrationETL Service, If set no, service will not be deployed. Eg. 1.29.15')
+    choice(name: 'edtaVersion', choices: "${edtaReleases}", description: 'Release Version of EDTA Service, If set no, service will not be deployed. Eg. 1.29.15')
+    choice(name: 'ivinVersion', choices: "${ivinReleases}", description: 'Release Version of IVIN Service, If set no, service will not be deployed. Eg. 1.29.15')
+    choice(name: 'commanddistributorVersion', choices: "${commanddistributorReleases}", description: 'Release Version of CommandDistributor Service, If set no, service will not be deployed. Eg. 1.29.15')
+    choice(name: 'geocalculationVersion', choices: "${geocalculationReleases}", description: 'Release Version of GeoCalculation Service, If set no, service will not be deployed. Eg. 1.29.15')
+    choice(name: 'specialneedsVersion', choices: "${specialneedsReleases}", description: 'Release Version of SpecialNeeds Service, If set no, service will not be deployed. Eg. 1.29.15')
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+
+      environment {}
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Get list of Services to deploy') {
+          steps {
+            script {
+              echo "Get service info to generate values.yaml"
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo '==> Clean up built after run'
+      cleanWs()
+      
+    }
+    success {
+      echo 'Job run success'
+    }
+    failure {
+      echo 'Job run failed'
+    }
+  }
+}

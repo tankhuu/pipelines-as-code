@@ -1,0 +1,163 @@
+// Notify to channel
+def notifyGChat(buildTag, releaseTag, channel, creator) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "Status: ${currentBuild.result}\nType: Backend\nStage: Tag Release\nFrom BuildTag: ${buildTag}\nReleaseTag: ${releaseTag}\nDuration: ${DURATION}\nCreator: ${creator}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack(buildTag, releaseTag, channel, creator) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *Backend Release Tag*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Status: *${currentBuild.result}*\nType: Backend\nStage: Tag Release\nFrom BuildTag: ${buildTag}\n*ReleaseTag: ${releaseTag}*\nDuration: ${DURATION}\nCreator: ${creator}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+
+node {
+  servicesList = sh (script: "aws ssm get-parameter --name /edulog/athena/services/list --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+}
+
+pipeline {
+  agent any
+  
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'service', choices: "${servicesList}", description: 'Service for tagging in ECR.')
+    string(name: 'buildTag', description: 'Build Version of Image. Eg: master-9edf379')
+    string(name: 'releaseTag', description: "The Release Tag that QC/QA wants to add into Image. Notes: Tag shouldn't have space. Ex: 1.29.0 ")
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.CREATOR = "$BUILD_USER_ID"
+              }
+              echo "Creator: $CREATOR"
+              if(CREATOR == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Get Service Repository') {
+          steps {
+            script {
+              env.repo = 'athena'
+              switch(service) {
+                case 'gateway':
+                  env.repo = "$repo/gateway"
+                  break
+                case 'tnxhub':
+                  env.repo = "$repo/tnxhubservice"
+                  break
+                case 'routing':
+                  env.repo = "$repo/routingservice"
+                  break
+                case 'geocodeservice':
+                  env.repo = "$repo/geocodeservice"
+                  break
+                case 'importservice':
+                  env.repo = "$repo/importservice"
+                  break
+                case 'overlay':
+                  env.repo = "$repo/overlay"
+                  break
+                case 'plannedrollover':
+                  env.repo = "$repo/plannedrolloverservice"
+                  break
+                case 'report':
+                  env.repo = "$repo/reportservice"
+                  break
+                case 'command-distributor':
+                  env.repo = "$repo/command-distributor"
+                  break
+                case 'geocalculation':
+                  env.repo = "$repo/geocalculation"
+                  break
+                case 'ivin':
+                  env.repo = "$repo/ivin"
+                  break
+                case 'timeattendance':
+                  env.repo = "$repo/timeattendance"
+                  break
+                case 'aggregateservice':
+                  env.repo = "$repo/aggregateservice"
+                  break
+                case 'rres':
+                  env.repo = "$repo/rres"
+                  break
+                case 'specialneeds':
+                  env.repo = "$repo/specialneeds"
+                  break
+                case 'routingmigration':
+                  env.repo = "$repo/routingmigration"
+                  break
+                case 'configserver':
+                  env.repo = "$repo/configserver"
+                  break
+                case 'geoserver':
+                  env.repo = "$repo/configserver"
+                  break
+              }
+            }
+          }
+        }
+        stage('Tag Backend Service in EKS') {
+          steps {
+            echo "Tagging for Backend Service $service"
+            sh '''
+              #!/bin/bash -xe
+              MANIFEST=$(aws ecr batch-get-image --repository-name $repo --image-ids imageTag=$buildTag --query 'images[].imageManifest' --output text)
+              aws ecr put-image --repository-name $repo --image-tag $releaseTag --image-manifest "$MANIFEST"
+            '''
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo '==> Clean up built after run'
+      cleanWs()
+    }
+    success {
+      echo 'Job run success'
+    }
+    failure {
+      echo 'Job run failed'
+    }
+  }
+}

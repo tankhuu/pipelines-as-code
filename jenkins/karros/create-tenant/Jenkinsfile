@@ -1,0 +1,86 @@
+node {
+    timezoneList = sh (script: 'cat ${JENKINS_HOME}/athena/config/timezone-list.txt', returnStdout: true).trim()
+}
+
+pipeline {
+  agent any
+  
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'envType', choices: ['nonprod', 'prod'], description: 'Environment Type of Tenant.')
+    string(name: 'name', description: 'Tenant name must contain only alphanumeric or hyphen.')
+    choice(name: 'timezone', choices: "${timezoneList}", description: 'Timezone of Tenant.')
+  }
+
+  environment {
+    FUNCTION_NAME = 'friday-manageMCTenant'
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.CREATOR = "${BUILD_USER_ID}"
+              }
+              if(CREATOR == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Lowercase Tenant Name') {
+          steps {
+            script {
+              env.tenantName = params.name.toLowerCase()
+            }
+          }
+        }
+        stage('Create Tenant in Karros Mission Control') {
+          steps {
+            script {
+              def fileName = 'event.json'
+              def event = [
+                "env": "$envType",
+                "action": "create",
+                "name": "$tenantName",
+                "timezone": "$timezone"
+              ]
+              writeJSON file: "$fileName", json: event
+              sh "cat $fileName"
+              sh "/usr/bin/python3 ./scripts/python/invoke_lambda.py --name=$FUNCTION_NAME --eventFile=$fileName"
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo '==> Clean up built after run'
+      cleanWs()
+      
+    }
+    success {
+      echo 'Job run success'
+    }
+    failure {
+      echo 'Job run failed'
+    }
+  }
+}

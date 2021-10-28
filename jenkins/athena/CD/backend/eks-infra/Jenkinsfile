@@ -1,0 +1,330 @@
+// Notify to channel
+def notifyGChat(site, service, branch, version, channel) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  if (branch == 'master' || branch == 'main') {
+    shortCommit = version.substring(0,7)
+    version = "$branch-$shortCommit"
+  }
+  hangoutsNotify message: "Status: *${currentBuild.result}*\nType: CD - Backend\nInfrastructure: EKS\nTarget Site: ${site}\nService: ${service}\nBranch: ${branch}\n*ECR Tag*: ${version}\nDuration: ${DURATION}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack(site, service, branch, version, channel) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  if (branch == 'master' || branch == 'main') {
+    shortCommit = version.substring(0,7)
+    version = "$branch-$shortCommit"
+  }
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *Athena Backend EKS*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Status: *${currentBuild.result}*\nType: CD - Backend\nInfrastructure: EKS\nTarget Site: ${site}\nService: ${service}\nBranch: ${branch}\n*ECR Tag*: ${version}\nDuration: ${DURATION}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+
+def dockerize(service, branch, version) {
+  // sh("eval \$(aws ecr get-login --no-include-email | sed 's|https://||')")
+  // Login to ECR with aws v2
+  def ecr = "696952606624.dkr.ecr.us-east-2.amazonaws.com"
+  sh "aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin $ecr"
+  shortCommit = version.substring(0,7)
+  buildTag = "$branch-${shortCommit}"
+  if (service == 'athena') {
+    docker.withRegistry('https://696952606624.dkr.ecr.us-east-2.amazonaws.com') {
+      def imagePlanRollOver = docker.build("athena/plannedrolloverservice:${version}", "./athena/dockerfile/plannedrolloverservice/${version}")
+      imagePlanRollOver.push("${version}")
+      imagePlanRollOver.push("$buildTag")
+      
+      def imageReport = docker.build("athena/reportservice:${version}", "./athena/dockerfile/reportservice/${version}")
+      imageReport.push("${version}")
+      imageReport.push("$buildTag")
+      
+      def imageRouteMigration = docker.build("athena/routingmigration:${version}", "./athena/dockerfile/routingmigration/${version}")
+      imageRouteMigration.push("${version}")
+      imageRouteMigration.push("$buildTag")
+      
+      def imageRouting = docker.build("athena/routingservice:${version}", "./athena/dockerfile/routingservice/${version}")
+      imageRouting.push("${version}")
+      imageRouting.push("$buildTag")
+      
+      def imageTransactionHub = docker.build("athena/tnxhubservice:${version}", "./athena/dockerfile/tnxhubservice/${version}")
+      imageTransactionHub.push("${version}")
+      imageTransactionHub.push("$buildTag")
+    }
+  }
+  else {
+    docker.withRegistry('https://696952606624.dkr.ecr.us-east-2.amazonaws.com') {
+      def image = docker.build("athena/${service}:${version}", "./athena/dockerfile/${service}/${version}")
+      image.push("${version}")
+      image.push("$branch-${shortCommit}")
+    }
+  }
+  // add tag for master into service tag list
+  if(branch == 'master' || branch == 'main') {
+    if(service == 'athena') {
+      sh "echo ${buildTag} >> ${JENKINS_HOME}/athena/services/buildTags/tnxhub.txt"
+      sh "echo ${buildTag} >> ${JENKINS_HOME}/athena/services/buildTags/routing.txt"
+      sh "echo ${buildTag} >> ${JENKINS_HOME}/athena/services/buildTags/plannedrollover.txt"
+      sh "echo ${buildTag} >> ${JENKINS_HOME}/athena/services/buildTags/reportsserver.txt"
+      sh "echo ${buildTag} >> ${JENKINS_HOME}/athena/services/buildTags/routingmigration.txt"
+    } else {
+      sh "echo ${buildTag} >> ${JENKINS_HOME}/athena/services/buildTags/${service}.txt"
+    }
+  }
+}
+
+def getBinary(service, branch, binary_path, version) {
+  if (service == 'athena') {
+      sh("aws s3 cp ${binary_path} .")
+      sh("tar xf ${version}.tar.gz")
+      sh("mkdir ./athena/dockerfile/plannedrolloverservice/${version}; cp -f $version/PlannedRollover.jar ./athena/dockerfile/plannedrolloverservice/Dockerfile ./athena/dockerfile/plannedrolloverservice/${version}/")
+      sh("mkdir ./athena/dockerfile/reportservice/${version}; cp -f $version/ReportsServer.jar ./athena/dockerfile/reportservice/Dockerfile ./athena/dockerfile/reportservice/${version}/")
+      sh("mkdir ./athena/dockerfile/routingmigration/${version}; cp -f  $version/RoutingMigration.jar ./athena/dockerfile/routingmigration/Dockerfile ./athena/dockerfile/routingmigration/${version}/")
+      sh("mkdir ./athena/dockerfile/routingservice/${version}; cp -f $version/RoutingServer.jar ./athena/dockerfile/routingservice/Dockerfile ./athena/dockerfile/routingservice/${version}/")
+      sh("mkdir ./athena/dockerfile/tnxhubservice/${version}; cp -f $version/TransactionHUBV2.jar ./athena/dockerfile/tnxhubservice/Dockerfile ./athena/dockerfile/tnxhubservice/${version}/")
+  }
+  else {
+    sh("aws s3 cp $binary_path .")
+    sh("mkdir -p ./athena/dockerfile/${service}/${version}; cp -f ./athena/dockerfile/${service}/Dockerfile *.jar ./athena/dockerfile/${service}/${version}/")
+  }
+}
+
+pipeline {
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    string(name: 'branch_name', description: 'Branch Name of the build which need to be deployed.')
+    choice(
+      name: 'service', 
+      choices: [
+        'gateway', 'athena', 'geocodeservice', 'aggregateservice', 'overlay', 'rres', 'importservice', 
+        'ivin', 'timeattendance', 'geocalculation', 'specialneeds', 'command-distributor'],
+      description: 'The Service Build that trigger this job.')
+    string(name: 'binary_path', description: "The binary path file name. Ex: s3://edulog-athena-artifacts/athena/build/")
+    string(name: 'version', defaultValue: '', description: 'Version of Service.')
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      environment {
+        ENV_TYPE = 'nonprod'
+        
+        GCHAT_TOKEN = "${GCHAT_TOKEN_ATH_BE_CICD}"
+        GCHAT_TOKEN_BUILDVERSION = "${GCHAT_TOKEN_ATH_BUILDVERSION}"
+        SLACK_CHANNEL = "${SLACK_ATH_CICD_BE}"
+        SLACK_CHANNEL_BUILDVERSION = "${SLACK_ATH_BUILDVERSION}"
+      }
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Run Jenkins Job') {
+          when {
+              expression { return params.refresh == false }
+          }
+          stages {
+            
+            stage('Get Service Name and Deployment Name') {
+              steps {
+                script {
+                  switch(service) {
+                    case 'gateway':
+                      env.service_name = 'gateway'
+                      break
+                    case 'geocodeservice':
+                      env.service_name = 'geocodeservice'
+                      break
+                    case 'aggregateservice':
+                      env.service_name = 'aggregateservice'
+                      break
+                    case 'importservice':
+                      env.service_name = 'importingservice'
+                      break
+                    case 'rres':
+                      env.service_name = 'rresservice'
+                      break
+                    case 'overlay':
+                      env.service_name = 'overlayservice'
+                      break
+                    case 'ivin':
+                      env.service_name = 'ivinservice'
+                      break
+                    case 'timeattendance':
+                      env.service_name = 'edtaservice'
+                      break
+                    case 'geocalculation':
+                      env.service_name = 'geocalculationservice'
+                      break
+                    case 'command-distributor':
+                      env.service_name = 'command-distributor'
+                      break
+                    case 'specialneeds':
+                      env.service_name = 'specialneeds'
+                      break
+                    default:
+                      env.service_name = 'Athena'
+                      break
+                  }
+                }
+              }
+            }
+            stage('Get environment information') {
+              steps {
+                echo "=> branch_name: ${params.branch_name}"
+                script {
+                  env.ENV_NAME = ''
+                  env.ENV_NAME_2 = ''
+                  env.SHOULD_RUN_CD = 'yes'
+                  switch(branch_name) {
+                    case 'development-ktvn':
+                      env.ENV_NAME = 'development-ktvn'
+                      // env.ENV_NAME_2 = 'devleg'
+                      break
+                    case 'ktvn':
+                      env.ENV_NAME = 'ktvn'
+                      // env.ENV_NAME_2 = 'stageleg'
+                      break
+                    case 'development-fr':
+                      env.ENV_NAME = 'development-fr'
+                      break
+                    case 'fr':
+                      env.ENV_NAME = 'fr'
+                      break
+                    case 'develop':
+                      env.ENV_NAME = 'develop'
+                      break
+                    case 'master':
+                      env.ENV_NAME = 'dg-uat'
+                      env.SHOULD_RUN_CD = 'no'
+                      break
+                    case 'main':
+                      env.ENV_NAME = 'dg-uat'
+                      env.SHOULD_RUN_CD = 'no'
+                      break
+                    default:
+                      env.SHOULD_RUN_CD = 'no'
+                      break
+                  }
+
+                  // check if branch_name match pattern "release/*" then set branch_name
+                  def releasePattern = ~/release\/.+/
+                  def matchRelease = releasePattern.matcher(branch_name).matches()
+                  if(matchRelease) { 
+                    env.ENV_NAME = 'release'
+                    env.ENV_NAME_2 = 'release-2'
+                    env.SHOULD_RUN_CD = 'yes'
+                  }
+
+                  // check if branch_name match pattern "hotfix/*" and env is ready to deploy
+                  def hotfixPattern = ~/hotfix\/.+/
+                  def matchHotfix = hotfixPattern.matcher(branch_name).matches()
+                  if(matchHotfix) {
+                    env.ENV_NAME = 'hotfix'
+                    // check hotfix env is available
+                    def hotfixInfa = sh('kubectl get ns | grep -w "^hotfix" ')
+                    if (hotfixInfa) {
+                      env.SHOULD_RUN_CD = 'yes'
+                    }
+                    else {
+                      env.SHOULD_RUN_CD = 'no'
+                    }
+                  }
+                }
+              }
+            }
+            stage('Get binary of ${service} with version ${version}') {
+              steps {
+                getBinary("${service}", "${branch_name}", "${binary_path}", "${version}")
+              }
+            }
+            stage('Dockerize ${service}') {
+              steps {
+                dockerize("${service}", "${branch_name}", "${version}")
+              }
+              post {
+                failure {
+                  echo "=> Build failure"
+                  notifyGChat("${ENV_NAME}", "${service}", "${branch_name}", "${version}", "${GCHAT_TOKEN_ATH_BUILDVERSION}")
+                  notifySlack("${ENV_NAME}", "${service}", "${branch_name}", "${version}", "${SLACK_ATH_BUILDVERSION}")
+                }
+                success {
+                  echo "=> Build success"
+                  notifyGChat("${ENV_NAME}", "${service}", "${branch_name}", "${version}", "${GCHAT_TOKEN_ATH_BUILDVERSION}")
+                  notifySlack("${ENV_NAME}", "${service}", "${branch_name}", "${version}", "${SLACK_ATH_BUILDVERSION}")
+                }
+              }
+            }
+            stage('Deploy to $ENV_NAME Environment') {
+              when {
+                equals expected: 'yes', actual: SHOULD_RUN_CD
+              }
+              steps {
+                script {
+                echo "=> Deploy to EKS Backend"
+                if (service == 'athena') {
+                  sh("kubectl -n ${ENV_NAME} set image cronjob routingmigration routingmigration=696952606624.dkr.ecr.us-east-2.amazonaws.com/athena/routingmigration:${version} --record")
+                  sh("kubectl -n ${ENV_NAME} delete job routingmigration||true")
+                  sh("kubectl -n ${ENV_NAME} create job --from=cronjob/routingmigration routingmigration;sleep 60")
+                  sh("kubectl -n ${ENV_NAME} set image deployment plannedrolloverservice plannedrolloverservice=696952606624.dkr.ecr.us-east-2.amazonaws.com/athena/plannedrolloverservice:${version} --record")
+                  sh("kubectl -n ${ENV_NAME} set image deployment reportservice reportservice=696952606624.dkr.ecr.us-east-2.amazonaws.com/athena/reportservice:${version} --record")
+                  sh("kubectl -n ${ENV_NAME} set image deployment routingservice routingservice=696952606624.dkr.ecr.us-east-2.amazonaws.com/athena/routingservice:${version} --record")
+                  sh("kubectl -n ${ENV_NAME} set image deployment tnxhubservice tnxhubservice=696952606624.dkr.ecr.us-east-2.amazonaws.com/athena/tnxhubservice:${version} --record")
+                  sh("kubectl -n ${ENV_NAME} rollout restart deployment plannedrolloverservice reportservice routingservice tnxhubservice")
+                }
+                else {
+                  sh("kubectl -n ${ENV_NAME} set image deployment ${service_name} ${service_name}=696952606624.dkr.ecr.us-east-2.amazonaws.com/athena/${service}:${version} --record")
+                  sh("kubectl -n ${ENV_NAME} rollout restart deployment ${service_name}")
+                  }
+                }
+                
+              }
+              post {
+                failure {
+                  echo "=> Build failure"
+                  notifyGChat("${ENV_NAME}", "${service}", "${branch_name}", "${version}", "${GCHAT_TOKEN}")
+                  notifySlack("${ENV_NAME}", "${service}", "${branch_name}", "${version}", "${SLACK_CHANNEL}")
+                }
+                success {
+                  echo "=> Build success"
+                  notifyGChat("${ENV_NAME}", "${service}", "${branch_name}", "${version}", "${GCHAT_TOKEN}")
+                  notifySlack("${ENV_NAME}", "${service}", "${branch_name}", "${version}", "${SLACK_CHANNEL}")
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo "=> Cleanup Workspace after finished!"
+      cleanWs()
+    }
+  }
+}

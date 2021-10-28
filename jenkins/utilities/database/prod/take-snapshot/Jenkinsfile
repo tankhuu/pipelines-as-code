@@ -1,0 +1,120 @@
+
+// Notify to channel
+def notifyGChat() {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "_${currentBuild.result}_\nDuration: ${DURATION}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack() {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *Subject here!*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Status: *${currentBuild.result}*\nDuration: ${DURATION}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+
+node {
+  sitesList = sh (script: 'cat ${JENKINS_HOME}/athena/sites/prod.sites.txt', returnStdout: true).trim()
+}
+
+pipeline{
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    string(name: 'description', description: 'Description of the Snapshot. Should add it for distinguishing with other Snapshot.')
+    choice(name: 'siteName', choices: "${sitesList}", description: 'SiteName to take DB snapshot from.')
+  }
+
+  environment {
+    envType = 'prod'
+    S3_BUCKET_NAME = 'edulog-athena-backup'
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Verify Authorization') {
+          steps {
+            script {
+              // Get Build User
+              wrap([$class: 'BuildUser']) {
+                env.CREATOR = "${BUILD_USER_ID}"
+              }
+              if(CREATOR == 'anonymous') {
+                error('You have to login to run this job!!!')
+              }
+            }
+          }
+        }
+        stage('Get AWS_CMD for env_type') {
+          steps {
+            script {
+              env.AWS_CMD = 'aws'
+              if(envType == 'prod') {
+                env.AWS_CMD = 'aws --profile prod'
+              } else {
+                env.AWS_CMD = 'aws'
+              }
+              env.runDate = sh(script: "echo `date +%Y%m%d-%H%M%S`", returnStdout: true).trim()
+            }
+          }
+        }
+        stage('Snapshot database') {
+          environment {
+            RDS_EP = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${envType}/${siteName}/rds_endpoint --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+            DB_PASS = sh(script: "${AWS_CMD} ssm get-parameter --with-decryption --name /edulog/athena/${envType}/${siteName}/db_pass --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+          }
+          steps {
+            dir('scripts/bash') {
+              echo "=> Run script take snapshot"
+              // Default Snapshot file name is: <db_name>-<environment>.<YYYYMMDD-HHmm>
+              sh "/bin/sh snapshot.sh ${envType} ${siteName} ${RDS_EP} ${DB_PASS} ${S3_BUCKET_NAME} ${runDate}"
+              echo "=> Snapshot Description: ${description}"
+            }
+          }
+        }
+      }
+    }
+  }
+  post {
+    always {
+      echo "=> Clean Workspace after run"
+      cleanWs()
+    }
+    success {
+      echo "==> Build Success"
+    }
+    failure {
+      echo "==> Build Failure"
+    }
+  }
+}

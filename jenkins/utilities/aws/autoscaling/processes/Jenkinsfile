@@ -1,0 +1,94 @@
+pipeline{
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'env_type', choices: ['nonprod', 'prod'], description: 'Type of Environment to take action on ASG.')
+    choice(name: 'location', choices: ['US', 'FR'], description: 'Location of the Infrastructure is hosted.')
+    string(name: 'environment', 
+      defaultValue: 'development-ktvn', 
+      description: 'Environment to take action on ASG. Default is development-ktvn')
+    choice(name: 'asg_type', choices: ['Backend', 'Cache-Queue'], description: 'Type of ASG for Environment. Default is Backend.')
+    choice(name: 'action', choices: ['suspend-processes', 'resume-processes'])
+  }
+
+  environment {
+    REGION_US = 'us-east-2'
+    REGION_FR = 'eu-west-3'
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage('Get AWS_CMD') {
+          steps {
+            script {
+
+              switch(location) {
+                case 'US': 
+                  env.REGION = REGION_US
+                  break
+                case 'FR':
+                  env.REGION = REGION_FR
+                  break
+                default:
+                  env.REGION = REGION_US
+                  break
+              }
+
+              env.AWS_CMD = 'aws'
+              if(env_type == 'prod') {
+                env.AWS_CMD = "aws --profile prod --region ${REGION}"
+              } else {
+                env.AWS_CMD = "aws --region ${REGION}"
+              }
+
+              // Get BE_ASG_NAME from AWS Parameter Store
+              switch(asg_type) {
+                case 'Backend':
+                  env.ASGTYPE = 'be_asg'
+                  break
+                case 'Cache-Queue':
+                  env.ASGTYPE = 'cq_asg'
+                  break
+                default:
+                  env.ASGTYPE = 'be_asg'
+                  break
+              }
+              env.ASG_NAME = sh(script: "${AWS_CMD} ssm get-parameter --name /edulog/athena/${env_type}/${environment}/${ASGTYPE} --output text --query 'Parameter.[Value]'", returnStdout: true).trim()
+            }
+          }
+        }
+        stage('Control AutoScaling Group') {
+          steps {
+            echo "=> Gonna ${action} on ASG: ${ASG_NAME}"
+            sh "${AWS_CMD} autoscaling ${action} --auto-scaling-group-name ${ASG_NAME}"
+          }
+        }
+      }
+    }
+  }
+  post {
+    always {
+      echo "=> Clean Workspace after run"
+      // cleanWs()
+    }
+    success {
+      echo "==> Build Success"
+    }
+    failure {
+      echo "==> Build Failure"
+    }
+  }
+}

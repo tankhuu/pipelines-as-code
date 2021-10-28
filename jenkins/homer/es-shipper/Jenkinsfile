@@ -1,0 +1,63 @@
+// Homer Elasticsearch Shipper Job
+
+
+pipeline {
+  agent any
+  
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    string(name: 'index', description: 'ES Index Name')
+    string(name: 'docId', description: 'ES docId')
+    string(name: 'docPath', description: 'ES document path')
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        /* Your Stages goes here! */
+        stage('indexing document') {
+          steps {
+            script {
+              def fileName = 'event.json'
+              def document = [
+                "type": "$type",
+                "buildVersion": "$buildVersion",
+                "releaseVersion": "$releaseVersion",
+                "description": "$description",
+                "creator": "$creator",
+                "createDate": "$createDate"
+              ]
+              writeJSON file: "$fileName", json: event
+              sh "aws s3 cp $fileName s3://"
+              sh "cat result.json"
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo '==> Clean up built after run'
+      cleanWs()
+    }
+    success {
+      echo "Job run success"
+    }
+    failure {
+      echo "Job run failed"
+    }
+  }
+}

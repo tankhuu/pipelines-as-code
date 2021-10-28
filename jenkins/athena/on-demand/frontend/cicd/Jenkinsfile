@@ -1,0 +1,112 @@
+pipeline {
+  agent any
+
+  environment {
+    LOCKER = 'ATH_FE_BUILDER'
+    GIT_REPO = 'git@github.com:eduloginc/EduLog-AthenaUI-v1_2.git'
+    GIT_CREDS = 'eduloginc-git-tankhuu'
+    ARTIFACT_PATH = 's3://edulog-athena-artifacts/ondemand/ui'
+    JOB_DEPLOY = 'athena/deploy/ondemand/ui-deploy'
+  }
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(name: 'type', choices: ['branch', 'tag'], description: 'Git Type of checkout. Default is checkout from branch')
+    string(name: 'specifier', defaultValue: 'dev', description: 'Git Branch/Tag specifier to checkout code. Default is checkout from dev branch.')
+    choice(name: 'env_type', choices: ['nonprod', 'prod'], description: 'Type of Environment to take snapshot. Currently supports for nonprod only.')
+    choice(name: 'environment', choices: ['development-ktvn', 'chiefleschi-wa-2', 'chiefleschi-wa-4', 'puydedome', 'opt-release', 'opt-release-2', 'release-2', 'pdd', 'frenchtown-sales', 'frenchtown-transfers'], description: 'Environment to deploy. Default is deadpool.')
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage("Get Branch Specifier") {
+          when { equals expected: 'branch', actual: params.type }
+          steps {
+            script {
+              env.GIT_SPEC = "refs/heads"
+            }
+          }
+        }
+        stage("Get Tag Specifier") {
+          when { equals expected: 'tag', actual: params.type }
+          steps {
+            script { 
+              env.GIT_SPEC = "refs/tags"
+            }
+          }
+        }
+        stage("Checkout") {
+          steps {
+            echo "=> Checkout from specifier: ${env.GIT_SPEC}/${params.specifier}"
+            script {
+              def scmVars = checkout([
+                $class: 'GitSCM', 
+                branches: [[name: "${env.GIT_SPEC}/${params.specifier}"]],
+                userRemoteConfigs: [[
+                  url: "${GIT_REPO}", 
+                  credentialsId: "${GIT_CREDS}"
+                  ]]
+              ])
+              // Set env GIT_COMMIT & SHORT_COMMIT & BUILD_VERSION
+              env.GIT_COMMIT = scmVars.GIT_COMMIT
+              env.SHORT_COMMIT = scmVars.GIT_COMMIT.substring(0,7)
+            }
+          }
+        }
+        stage("Build") {
+          steps {
+            sh 'npm install > /dev/null'
+            sh 'npm run postinstall'
+            // Make sure building angularjs jobs not run at the same time
+            lock("${LOCKER}") {
+              echo "==> Building..."
+              sh 'npm run build:prod'
+            }
+          }
+        }
+        stage("Artifacts") {
+          steps {
+            echo "=> Create Artifact"
+            sh 'tar zcvf ${GIT_COMMIT}.tar.gz dist/'
+            echo "=> Upload package Artifact to ${ARTIFACT_PATH}/"
+            sh "aws s3 cp ${GIT_COMMIT}.tar.gz ${ARTIFACT_PATH}/"
+          }
+        }
+        stage("Deploy") {
+          steps {
+            echo "=> Deploy to ${params.environment}"
+            build job: "${JOB_DEPLOY}", parameters: [
+              string(name: 'env_type', value: "${env_type}"),
+              string(name: 'artifact_path', value: "${ARTIFACT_PATH}/${GIT_COMMIT}.tar.gz"),
+              string(name: 'environment', value: "${environment}"),
+              string(name:'version', value: "${SHORT_COMMIT}")]
+          }
+        }
+      }
+    }
+  }
+  post{
+    always {
+      echo "========always========"
+      // cleanWs()
+    }
+    success {
+      echo "========pipeline executed successfully ========"
+    }
+    failure {
+      echo "========pipeline execution failed========"
+    }
+  }
+}

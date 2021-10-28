@@ -1,0 +1,223 @@
+// JobName: ath-checkout-git-repo
+pipeline {
+  agent any
+
+  environment {
+    GIT_REPO_ATH = 'git@github.com:eduloginc/Athena.git'
+    GIT_REPO_GW = 'git@github.com:eduloginc/Athena-Gateway.git'
+    GIT_REPO_GEOCODE = 'git@github.com:eduloginc/Athena-GeocodeService.git'
+    GIT_REPO_IMPORT = 'git@github.com:eduloginc/Athena-Importing.git'
+    GIT_REPO_IVIN = 'git@github.com:eduloginc/Athena-IVIN.git'
+    GIT_REPO_EDTA = 'git@github.com:eduloginc/Athena-EDTA.git'
+    GIT_REPO_AGG = 'git@github.com:eduloginc/Athena-AggregateService.git'
+    GIT_REPO_RRES = 'git@github.com:eduloginc/athena-ride-registration-etl-service.git'
+    GIT_REPO_OVERLAY = 'git@github.com:eduloginc/Athena-Overlay.git'
+    GIT_REPO_ACD = 'git@github.com:eduloginc/AthenaCommandDistributorService.git'
+    GIT_CREDS = 'eduloginc-git-tankhuu'
+    ARTIFACT_PREFIX = 's3://edulog-athena-artifacts'
+    PROD_ARTIFACT_PREFIX = 's3://edulog-athena-prod-artifacts'
+  }
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    choice(
+      name: 'service', 
+      choices: [
+        'gateway', 'athena', 'geocodeservice', 'aggregateservice', 'overlay', 'rres', 'importservice', 'ivin', 
+        'timeattendance', 'acd'
+      ], 
+      description: 'The Service Build that trigger this job.')
+    choice(name: 'type', choices: ['branch', 'tag'], description: 'Git Type of checkout. Default is checkout from branch')
+    string(name: 'specifier', defaultValue: 'dev', description: 'Git Branch/Tag specifier to checkout code. Default is checkout from dev branch.')
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages{
+        stage("Get Branch Specifier") {
+          when { equals expected: 'branch', actual: params.type }
+          steps {
+            script {
+              env.GIT_SPEC = "refs/heads"
+            }
+          }
+        }
+        stage("Get Tag Specifier") {
+          when { equals expected: 'tag', actual: params.type }
+          steps {
+            script { 
+              env.GIT_SPEC = "refs/tags"
+            }
+          }
+        }
+        stage("Checkout") {
+          steps {
+            echo "=> Checkout from specifier: ${env.GIT_SPEC}/${params.specifier}"
+            script {
+              switch(params.service) {
+                case 'athena':
+                  env.GIT_REPO = GIT_REPO_ATH
+                  break
+                case 'gateway':
+                  env.GIT_REPO = GIT_REPO_GW
+                  break
+                case 'geocodeservice':
+                  env.GIT_REPO = GIT_REPO_GEOCODE
+                  break
+                case 'importservice':
+                  env.GIT_REPO = GIT_REPO_IMPORT
+                  break
+                case 'aggregateservice':
+                  env.GIT_REPO = GIT_REPO_AGG
+                  break
+                case 'overlay':
+                  env.GIT_REPO = GIT_REPO_OVERLAY
+                  break
+                case 'rres':
+                  env.GIT_REPO = GIT_REPO_RRES
+                  break
+                case 'ivin':
+                  env.GIT_REPO = GIT_REPO_IVIN
+                  break
+                case 'timeattendance':
+                  env.GIT_REPO = GIT_REPO_EDTA
+                  break
+                case 'acd':
+                  env.GIT_REPO = GIT_REPO_ACD
+                  break
+              }
+
+              echo "service: ${GIT_REPO}"
+              def scmVars = checkout([
+                $class: 'GitSCM', 
+                branches: [[name: "${env.GIT_SPEC}/${params.specifier}"]],
+                userRemoteConfigs: [[
+                  url: "${GIT_REPO}", 
+                  credentialsId: "${GIT_CREDS}"
+                  ]]
+              ])
+              // Set env GIT_COMMIT & SHORT_COMMIT & BUILD_VERSION
+              env.GIT_COMMIT = scmVars.GIT_COMMIT
+              env.SHORT_COMMIT = scmVars.GIT_COMMIT.substring(0,7)
+            }
+          }
+        }
+        stage("Build Athena Repo Services") {
+          when { equals expected: 'athena', actual: params.service }
+          steps {
+            echo "=> Athena Repo Services include: tnxhub|routing|migration|plannedrollover|reports"
+            echo "=> Build Service for branch: ${env.BRANCH_NAME}"
+            dir('Source/BuildAggregator') {
+              //sh 'cp -p ${JENKINS_HOME}/athena/config/BuildAggregator/pom.xml .'
+              echo "==> Get build_version"
+              script {
+                env.BUILD_VERSION = "${GIT_COMMIT}"
+              }
+              echo "==> Build Services with build_version: ${env.BUILD_VERSION}"
+              sh 'mvn clean install -DskipTests -e -U'
+            }
+          }
+        }
+        stage("Artifacts Athena Services") {
+          when { equals expected: 'athena', actual: params.service }
+          environment { 
+            ARTIFACT_PATH = "${ARTIFACT_PREFIX}/build"
+            PROD_ARTIFACT_PATH = "${PROD_ARTIFACT_PREFIX}/build"
+          }
+          steps {
+            echo "=> Prepare for package jar files"
+            dir("${JENKINS_HOME}/.m2/repository/com/edulog") {
+              sh '''#!/bin/bash -xe
+                BUILD_DIR=/tmp/${BUILD_VERSION}
+                mkdir -p /tmp/${BUILD_VERSION}
+                cp -p RoutingServer/0.1.0/RoutingServer-0.1.0.jar $BUILD_DIR/RoutingServer.jar
+                cp -p ReportsServer/0.1.0/ReportsServer-0.1.0.jar $BUILD_DIR/ReportsServer.jar
+                cp -p TransactionHUBV2/2.1.0/TransactionHUBV2-2.1.0.jar $BUILD_DIR/TransactionHUBV2.jar
+                cp -p RoutingMigration/1.0/RoutingMigration-1.0.jar $BUILD_DIR/RoutingMigration.jar
+                cp -p PlannedRollover/2.1.0/PlannedRollover-2.1.0.jar $BUILD_DIR/PlannedRollover.jar
+                ls -l $BUILD_DIR
+              '''
+            }
+            echo "=> Package jar files"
+            sh """#!/bin/bash
+              cd /tmp
+              tar zcvf ${BUILD_VERSION}.tar.gz ${BUILD_VERSION}
+            """
+            echo "=> Upload Artifact ${service}.jar to S3"
+            sh '''#!/bin/bash -xe
+              aws s3 cp /tmp/${BUILD_VERSION}.tar.gz ${ARTIFACT_PATH}/${service}/
+              aws --profile prod s3 cp /tmp/${BUILD_VERSION}.tar.gz ${PROD_ARTIFACT_PATH}/${service}/
+            '''
+            echo "=> Cleanup temporary files & folders"
+            sh """#!/bin/bash
+              cd /tmp
+              rm -f ${BUILD_VERSION}.tar.gz
+              rm -rf ${BUILD_VERSION}
+            """
+          }
+          post {
+            success {
+              echo "NonProd Artifact Path: ${ARTIFACT_PATH}/${service}/${BUILD_VERSION}.tar.gz"
+              echo "Prod Artifact Path: ${PROD_ARTIFACT_PATH}/${service}/${BUILD_VERSION}.tar.gz"
+            }
+          }
+        }
+        stage("Build Athena Single Service") {
+          when { not { equals expected: 'athena', actual: params.service } }
+          steps {
+            echo "==> Get build_version"
+            script {
+              env.BUILD_VERSION = GIT_COMMIT
+            }
+            echo "=> Build Version: $BUILD_VERSION"
+            echo "==> Build Service for branch: ${env.BRANCH_NAME}"
+            sh 'mvn clean install'
+          }
+        }
+        stage("Artifacts Single Service") {
+          when { not { equals expected: 'athena', actual: params.service } }
+          environment { 
+            ARTIFACT_PATH = "${ARTIFACT_PREFIX}/build"
+            PROD_ARTIFACT_PATH = "${PROD_ARTIFACT_PREFIX}/build"
+          }
+          steps {
+            echo "==> Upload Artifact ${service}.jar to S3"
+            dir('target') {
+              sh "aws s3 cp *.jar ${ARTIFACT_PATH}/${service}/${BUILD_VERSION}.jar"
+              sh "aws --profile prod s3 cp *.jar ${PROD_ARTIFACT_PATH}/${service}/${BUILD_VERSION}.jar"
+            }
+          }
+          post {
+            success {
+              echo "NonProd Artifact Path: ${ARTIFACT_PATH}/${service}/${BUILD_VERSION}.jar"
+              echo "Prod Artifact Path: ${PROD_ARTIFACT_PATH}/${service}/${BUILD_VERSION}.jar"
+            }
+          }
+        }
+      }
+    }
+  }
+  post{
+    always {
+      echo "========always========"
+      cleanWs()
+    }
+    success {
+      echo "========pipeline executed successfully ========"
+    }
+    failure {
+      echo "========pipeline execution failed========"
+    }
+  }
+}

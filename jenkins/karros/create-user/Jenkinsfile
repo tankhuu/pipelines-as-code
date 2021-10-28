@@ -1,0 +1,55 @@
+node {
+    timezoneList = sh (script: 'cat ${JENKINS_HOME}/athena/config/timezone-list.txt', returnStdout: true).trim()
+}
+
+pipeline {
+  agent any
+
+  environment {
+    GIT_REPO = 'git@github.com:eduloginc/devops-automation-helper.git'
+    GIT_CREDS = 'eduloginc-git-tankhuu'
+  }
+
+  parameters {
+    string(name: 'TENANT_NAME', description: 'Tenant name must contain only alphanumeric or hyphen.')
+    choice(name: 'TIMEZONE', choices: "${timezoneList}", description: 'Choose a Timezone for new Tenant.')
+    string(name: 'EMAIL', description: 'Admin User Email for managing Tenant.')
+    string(name: 'FIRST_NAME', description: 'Admin User First Name.')
+    string(name: 'LAST_NAME', description: 'Admin User Last Name.')
+  }
+
+  stages {
+    stage("Checkout") {
+      steps {
+        echo "=> Checkout Automation Helper Repository"
+        script {
+          def scmVars = checkout([
+            $class: 'GitSCM', 
+            branches: [[name: "*/main"]],
+            userRemoteConfigs: [[
+              url: "${GIT_REPO}", 
+              credentialsId: "${GIT_CREDS}"
+              ]]
+          ])
+        }
+      }
+    }
+
+    stage("Create New Tenant and User") {
+      environment {
+        TENANT_ID = sh (script: 'python3 mission_control/MissionControl.py create_tenant --tenant_name=${TENANT_NAME} --timezone=${TIMEZONE}', returnStdout: true).trim()
+      }
+      steps {
+        echo "=> Create User and attach to Tenant"
+        sh "python3 MissionControl.py create_user --email=${EMAIL} --first_name=${FIRST_NAME} --last_name=${LAST_NAME} --tenant_id=${TENANT_ID}"
+        echo "=> Export tenant_id to file for using"
+        sh "echo ${TENANT_ID} > /tmp/${TENANT_NAME}.id"
+      }
+    }
+  }
+  post {
+    always {
+      cleanWs()
+    }
+  }
+}

@@ -1,0 +1,83 @@
+
+// Notify to channel
+def notifyGChat(env, branch, version, commit, channel) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  hangoutsNotify message: "_${currentBuild.result}_\nDuration: ${DURATION}",
+    token: "${channel}", threadByJob: true
+}
+
+def notifySlack(env, branch, version, commit, channel) {
+  def DURATION = currentBuild.durationString.split(' and ')[0]
+  def blocks = [
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": ":rocket: *Subject here!*"
+      ]
+    ],
+      [
+      "type": "divider"
+    ],
+    [
+      "type": "section",
+      "text": [
+        "type": "mrkdwn",
+        "text": "Status: *${currentBuild.result}*\nDuration: ${DURATION}"
+      ]
+    ]
+  ]
+  slackSend(channel: "#${channel}", blocks: blocks)
+}
+
+pipeline{
+  agent any
+
+  parameters {
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')
+    string(name: 'TENANT_NAME', description: 'The name of Tenant you want to verify data')
+    choice(name: 'ENV_TYPE', choices: ['nonprod', 'prod'], description: 'The type of environment: non production or production')
+    password(name: 'DB_PASS', defaultValue: 'rU18iWV4qxKU', description: 'Password for user postgres of RDS')
+    choice(name: 'REGION', choices: ['us-east-2', 'eu-west-3'], description: 'Ohio: us-east-2. Paris: eu-west-3')
+  }
+
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        stage ('Clone Athena-DBScripts repo') {
+          steps {
+            sh 'git clone git@github.com:eduloginc/Athena-DBScripts.git'
+          }
+        }
+        stage ('Verify database') {
+          steps {
+            sh './utilities/database/verify-database/verify-database.sh ${TENANT_NAME} ${ENV_TYPE} ${DB_PASS} ${REGION}'
+          }
+        }
+      }
+    }
+  }
+  post {
+    always {
+      echo "=> Clean Workspace after run"
+      cleanWs()
+    }
+    success {
+      echo "==> Build Success"
+    }
+    failure {
+      echo "==> Build Failure"
+    }
+  }
+}

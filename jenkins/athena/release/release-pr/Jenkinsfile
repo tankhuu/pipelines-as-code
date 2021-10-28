@@ -1,0 +1,276 @@
+pipeline {							
+  agent any
+  parameters {	
+    booleanParam(name: 'refresh', defaultValue: false, description: 'Read Jenkinsfile and exit.')						
+    string(name: 'CURRENT_RELEASE', description: 'The current release branch. e.g: 1.36.0')
+    string(name: 'NEW_RELEASE', description: 'The new release branch. E.g. 1.37.0')
+  }
+	
+  environment {
+    //Should be modify when mirgate the job
+    GH_USER = "sangkhuu"
+    GIT_TOKEN = credentials('sangkhuugithub')
+    // Reponsitory Prefix define
+    REPO_PROTO = "https://"
+    REPO_PREFIX = "github.com/eduloginc"
+    
+    // Athena Reponsitories
+    AGGREGATE = "Athena-AggregateService"
+    OVERLAY = "Athena-Overlay"
+    RIDE_REGIS = "athena-ride-registration-etl-service"
+    ATHENA = "Athena"
+    GEO_CALC = "Athena-GeoCalculation"
+    GEO_CODE = "Athena-GeocodeService"
+    IMPORTING = "Athena-Importing"
+    GATEWAY = "Athena-Gateway"
+    ATHENA_UI = "EduLog-AthenaUI-v1_2"
+    ATHENA_IVIN = "Athena-IVIN"
+    ATHENA_EDTA = "Athena-EDTA"
+    CM_DIST = "AthenaCommandDistributorService"
+    WEB_QUERY = "web-query"
+    SPECIAL_NEED = "Athena-SpecialNeeds"
+
+  }
+			
+	
+  stages {
+    stage('Read Jenkinsfile') {
+      when {
+        expression { return params.refresh == true }
+      }
+      steps {
+        echo("Refreshed Jenkins Job")
+      }
+    }
+    stage('Run Jenkins Job') {
+      when {
+          expression { return params.refresh == false }
+      }
+      stages {
+        // Stage No.1	    
+        stage('Athena-AggregateService') {
+          steps {
+            echo "==> State for : ${AGGREGATE}"
+            //Clonning GitHub Reponsitory
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              sh ('git clone ${REPO_PROTO}${GH_USER}:${GIT_TOKEN_PSW}@${REPO_PREFIX}/${AGGREGATE}.git')
+              //Enter Reponsitory's Workspace
+              dir("${env.WORKSPACE}/${AGGREGATE}/"){
+                sh "gh pr create --title PR_release/${CURRENT_RELEASE}_to_master --body Prepare_for_new_release/${NEW_RELEASE} --base master --head release/${CURRENT_RELEASE}"
+              }		
+            }
+          }						
+        }
+
+        // Stage No.2
+        stage('Athena-Overlay') {
+          steps {
+            echo "==> State for : ${OVERLAY}"
+            //Clonning GitHub Reponsitory
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              sh ('git clone ${REPO_PROTO}${GH_USER}:${GIT_TOKEN_PSW}@${REPO_PREFIX}/${OVERLAY}.git')
+              //Enter Reponsitory's Workspace
+              dir("${env.WORKSPACE}/${OVERLAY}/"){
+                sh "gh pr create --title PR_release/${CURRENT_RELEASE}_to_master --body Prepare_for_new_release/${NEW_RELEASE} --base master --head release/${CURRENT_RELEASE}"
+              }		
+            }
+          }						
+        }
+
+        // Stage No.3
+        stage('athena-ride-registration-etl-service') {
+          steps {
+            echo "==> State for : ${RIDE_REGIS}"
+            //Clonning GitHub Reponsitory
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              sh ('git clone ${REPO_PROTO}${GH_USER}:${GIT_TOKEN_PSW}@${REPO_PREFIX}/${RIDE_REGIS}.git')
+              //Enter Reponsitory's Workspace
+              dir("${env.WORKSPACE}/${RIDE_REGIS}/"){
+                sh "gh pr create --title PR_release/${CURRENT_RELEASE}_to_master --body Prepare_for_new_release/${NEW_RELEASE} --base master --head release/${CURRENT_RELEASE}"
+              }		
+            }
+          }						
+        }
+
+        // Stage No.4
+        stage('Athena') {
+          steps {
+            echo "==> State for : ${ATHENA}"
+            //Clonning GitHub Reponsitory
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              sh ('git clone ${REPO_PROTO}${GH_USER}:${GIT_TOKEN_PSW}@${REPO_PREFIX}/${ATHENA}.git')
+              //Enter Reponsitory's Workspace
+              dir("${env.WORKSPACE}/${ATHENA}/"){
+                sh "gh pr create --title PR_release/${CURRENT_RELEASE}_to_master --body Prepare_for_new_release/${NEW_RELEASE} --base master --head release/${CURRENT_RELEASE}"
+              }     
+            }
+          }                     
+        }
+
+        // Stage No.5
+        stage('Athena-GeoCalculation') {
+          steps {
+            echo "==> State for : ${GEO_CALC}"
+            //Clonning GitHub Reponsitory
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              sh ('git clone ${REPO_PROTO}${GH_USER}:${GIT_TOKEN_PSW}@${REPO_PREFIX}/${GEO_CALC}.git')
+              //Enter Reponsitory's Workspace
+              dir("${env.WORKSPACE}/${GEO_CALC}/"){
+                sh "gh pr create --title PR_release/${CURRENT_RELEASE}_to_master --body Prepare_for_new_release/${NEW_RELEASE} --base master --head release/${CURRENT_RELEASE}"
+              }     
+            }
+          }                     
+        }
+
+        // Stage No.6
+        stage('Athena-GeocodeService') {
+          steps {
+            echo "==> State for : ${GEO_CODE}"
+            //Clonning GitHub Reponsitory
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              sh ('git clone ${REPO_PROTO}${GH_USER}:${GIT_TOKEN_PSW}@${REPO_PREFIX}/${GEO_CODE}.git')
+              //Enter Reponsitory's Workspace
+              dir("${env.WORKSPACE}/${GEO_CODE}/"){
+                sh "gh pr create --title PR_release/${CURRENT_RELEASE}_to_master --body Prepare_for_new_release/${NEW_RELEASE} --base master --head release/${CURRENT_RELEASE}"
+              }     
+            }
+          }                     
+        }
+
+        // Stage No.7
+        stage('Athena-Importing') {
+          steps {
+            echo "==> State for : ${IMPORTING}"
+            //Clonning GitHub Reponsitory
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              sh ('git clone ${REPO_PROTO}${GH_USER}:${GIT_TOKEN_PSW}@${REPO_PREFIX}/${IMPORTING}.git')
+              //Enter Reponsitory's Workspace
+              dir("${env.WORKSPACE}/${IMPORTING}/"){
+                sh "gh pr create --title PR_release/${CURRENT_RELEASE}_to_master --body Prepare_for_new_release/${NEW_RELEASE} --base master --head release/${CURRENT_RELEASE}"
+              }     
+            }
+          }                     
+        }
+
+        // Stage No.8
+        stage('Athena-Gateway') {
+          steps {
+            echo "==> State for : ${GATEWAY}"
+            //Clonning GitHub Reponsitory
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              sh ('git clone ${REPO_PROTO}${GH_USER}:${GIT_TOKEN_PSW}@${REPO_PREFIX}/${GATEWAY}.git')
+              //Enter Reponsitory's Workspace
+              dir("${env.WORKSPACE}/${GATEWAY}/"){
+                sh "gh pr create --title PR_release/${CURRENT_RELEASE}_to_master --body Prepare_for_new_release/${NEW_RELEASE} --base master --head release/${CURRENT_RELEASE}"
+              }     
+            }
+          }                     
+        }
+
+        // Stage No.9
+        stage('EduLog-AthenaUI-v1_2') {
+          steps {
+            echo "==> State for : ${ATHENA_UI}"
+            //Clonning GitHub Reponsitory
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              sh ('git clone ${REPO_PROTO}${GH_USER}:${GIT_TOKEN_PSW}@${REPO_PREFIX}/${ATHENA_UI}.git')
+              //Enter Reponsitory's Workspace
+              dir("${env.WORKSPACE}/${ATHENA_UI}/"){
+                sh "gh pr create --title PR_release/${CURRENT_RELEASE}_to_master --body Prepare_for_new_release/${NEW_RELEASE} --base master --head release/${CURRENT_RELEASE}"
+              }     
+            }
+          }                     
+        }
+
+        // Stage No.10
+        stage('Athena-IVIN') {
+          steps {
+            echo "==> State for : ${ATHENA_IVIN}"
+            //Clonning GitHub Reponsitory
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              sh ('git clone ${REPO_PROTO}${GH_USER}:${GIT_TOKEN_PSW}@${REPO_PREFIX}/${ATHENA_IVIN}.git')
+              //Enter Reponsitory's Workspace
+              dir("${env.WORKSPACE}/${ATHENA_IVIN}/"){
+                sh "gh pr create --title PR_release/${CURRENT_RELEASE}_to_master --body Prepare_for_new_release/${NEW_RELEASE} --base master --head release/${CURRENT_RELEASE}"
+              }     
+            }
+          }                     
+        }
+
+        // Stage No.11
+        stage('Athena-EDTA') {
+          steps {
+            echo "==> State for : ${ATHENA_EDTA}"
+            //Clonning GitHub Reponsitory
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              sh ('git clone ${REPO_PROTO}${GH_USER}:${GIT_TOKEN_PSW}@${REPO_PREFIX}/${ATHENA_EDTA}.git')
+              //Enter Reponsitory's Workspace
+              dir("${env.WORKSPACE}/${ATHENA_EDTA}/"){
+                sh "gh pr create --title PR_release/${CURRENT_RELEASE}_to_master --body Prepare_for_new_release/${NEW_RELEASE} --base master --head release/${CURRENT_RELEASE}"
+              }     
+            }
+          }                     
+        }
+
+        // Stage No.12
+        stage('AthenaCommandDistributorService') {
+          steps {
+            echo "==> State for : ${CM_DIST}"
+            //Clonning GitHub Reponsitory
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              sh ('git clone ${REPO_PROTO}${GH_USER}:${GIT_TOKEN_PSW}@${REPO_PREFIX}/${CM_DIST}.git')
+              //Enter Reponsitory's Workspace
+              dir("${env.WORKSPACE}/${CM_DIST}/"){
+                sh "gh pr create --title PR_release/${CURRENT_RELEASE}_to_master --body Prepare_for_new_release/${NEW_RELEASE} --base master --head release/${CURRENT_RELEASE}"
+              }     
+            }
+          }                     
+        }
+
+        // Stage No.13
+        stage('web-query') {
+          steps {
+            echo "==> State for : ${WEB_QUERY}"
+            //Clonning GitHub Reponsitory
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              sh ('git clone ${REPO_PROTO}${GH_USER}:${GIT_TOKEN_PSW}@${REPO_PREFIX}/${WEB_QUERY}.git')
+              //Enter Reponsitory's Workspace
+              dir("${env.WORKSPACE}/${WEB_QUERY}/"){
+                sh "gh pr create --title PR_release/${CURRENT_RELEASE}_to_master --body Prepare_for_new_release/${NEW_RELEASE} --base master --head release/${CURRENT_RELEASE}"
+              }
+            }
+          }
+        }
+
+        // Stage No.14
+        stage('Athena-SpecialNeeds') {
+          steps {
+            echo "==> State for : ${SPECIAL_NEED}"
+            //Clonning GitHub Reponsitory
+            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              sh ('git clone ${REPO_PROTO}${GH_USER}:${GIT_TOKEN_PSW}@${REPO_PREFIX}/${SPECIAL_NEED}.git')
+              //Enter Reponsitory's Workspace
+              dir("${env.WORKSPACE}/${SPECIAL_NEED}/"){
+                sh "gh pr create --title PR_release/${CURRENT_RELEASE}_to_master --body Prepare_for_new_release/${NEW_RELEASE} --base master --head release/${CURRENT_RELEASE}"
+              }
+            }
+          }
+        }
+
+
+      }
+    }
+  }
+  post {
+    always {
+      echo "=> Clean Workspace after run"
+      cleanWs()
+    }
+    success {
+      echo "==> Build Success"
+    }
+    failure {
+      echo "==> Build Failure"
+    }
+  }
+}
